@@ -1,0 +1,44 @@
+{
+  "sessionDir": "~/.pi/agent/herd",
+  "maxModelConcurrent": 2,
+  "local": {
+    "enabled": true,
+    "model": "vllm/Qwen/Qwen3.6-27B-FP8",
+    "thinking": "medium",
+    "maxStreams": 1,
+    "preflight": true
+  },
+  "easy": [
+    {
+      "model": "vllm/Qwen/Qwen3.6-27B-FP8",
+      "thinking": "medium",
+      "local": true
+    },
+    {
+      "model": "claude-code/claude-sonnet-5",
+      "thinking": "medium"
+    }
+  ],
+  "medium": [
+    {
+      "model": "grok-cli/grok-build",
+      "thinking": "medium"
+    }
+  ],
+  "hard": [
+    {
+      "model": "grok-cli/grok-4.5",
+      "thinking": "high"
+    },
+    {
+      "model": "claude-code/claude-opus-4-8",
+      "thinking": "high"
+    }
+  ],
+  "defaults": {
+    "isolation": "none",
+    "timeoutMs": 600000,
+    "waitForReply": false,
+    "requireOutput": true
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "name": "@itc-steve/pi-herdr",
+  "version": "1.0.0",
+  "description": "Pi extension: Herdr-visible subagent herd with difficulty-based model routing, local vLLM preference, markdown handoffs, and herdr terminal control.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "herdr",
+    "herd",
+    "multi-agent",
+    "pane-management"
+  ],
+  "author": {
+    "name": "itc-steve",
+    "url": "https://github.com/itc-steve"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itc-steve/pi-herdr.git"
+  },
+  "bugs": {
+    "url": "https://github.com/itc-steve/pi-herdr/issues"
+  },
+  "homepage": "https://github.com/itc-steve/pi-herdr#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "skills",
+    "herd.json.example",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  }
+}
