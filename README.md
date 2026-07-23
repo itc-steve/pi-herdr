@@ -2,7 +2,7 @@
 
 Pi extension for **Herdr-visible subagent herds**: difficulty-based model routing (easy → local vLLM first), markdown handoff runs, exclusive write lanes, and a structured `herdr` tool for terminal control.
 
-Requires running **inside [Herdr](https://github.com/earendil-works/herdr)** (`HERDR_ENV=1`). Outside Herdr, `herd` still loads for config/status, but spawn/boot and the `herdr` tool are inactive.
+Requires running **inside [Herdr](https://herdr.dev)** (`HERDR_ENV=1`). Outside Herdr, `herd` still loads for config/status, but spawn/boot and the `herdr` tool are inactive.
 
 ## Install
 
@@ -23,7 +23,7 @@ Then `/reload`. Use `/herd help` for slash usage.
 ## Requirements
 
 - [Pi coding agent](https://github.com/earendil-works/pi)
-- [Herdr](https://github.com/earendil-works/herdr) for multi-pane spawn/view (set by Herdr when you open a pane)
+- [Herdr](https://herdr.dev) (terminal workspace / agent multiplexer)
 - Models listed in config must already be available to Pi (local vLLM, Claude Code, Grok CLI, etc.)
 
 ## Config
