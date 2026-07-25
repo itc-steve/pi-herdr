@@ -3,7 +3,7 @@
  */
 
 import type { HerdConfig, ManagedJob } from "../types.ts";
-import { resolveModel } from "../resolve-model.ts";
+import { resolveModelClaimingLocal } from "../resolve-model.ts";
 import {
   assertLaneAvailable,
   assertMultiWriterOwns,
@@ -102,12 +102,27 @@ export async function spawnJob(opts: {
   let ticketId = "";
 
   try {
-    const resolved = resolveModel(config, {
-      difficulty: params.difficulty,
-      model: params.model,
-      thinking: params.thinking,
-      localInUse: localLock.inUse(),
-    });
+    // Job id first so the local-stream claim has a stable holder key before any
+    // async work. Parallel easy spawns all race the single local seat.
+    const { runId, runDir } = requireActiveOrRef(config.sessionDir, params.run);
+    jobId = nextJobId(runDir);
+    const label = params.label?.trim() || jobId;
+    const sessionFile = ensureJobSessionFile(runDir, jobId);
+
+    // Atomically resolve + claim local (queue or overflow per local.whenFull).
+    const claimed = await resolveModelClaimingLocal(
+      config,
+      {
+        difficulty: params.difficulty,
+        model: params.model,
+        thinking: params.thinking,
+        jobId,
+      },
+      localLock,
+      opts.parentSignal,
+    );
+    const resolved = claimed.resolved;
+    localHeld = claimed.localHeld;
 
     if (resolved.local) {
       await preflightLocalModel({
@@ -116,11 +131,6 @@ export async function spawnJob(opts: {
         probe: opts.modelProbe,
       });
     }
-
-    const { runId, runDir } = requireActiveOrRef(config.sessionDir, params.run);
-    jobId = nextJobId(runDir);
-    const label = params.label?.trim() || jobId;
-    const sessionFile = ensureJobSessionFile(runDir, jobId);
 
     let outputPath: string | undefined;
     let outputBaselineBytes: number | undefined;
@@ -140,16 +150,6 @@ export async function spawnJob(opts: {
       forbid,
       inFlight: monitor.inFlightLaneClaims(jobId),
     });
-
-    if (resolved.local) {
-      if (!localLock.tryAcquire(jobId)) {
-        throw new SpawnError(
-          `Local streams full (${localLock.inUse()}/${localLock.maxStreamsCount()}). ` +
-            `Retry, wait, or spawn without forcing the local model.`,
-        );
-      }
-      localHeld = true;
-    }
 
     // Per-model seat keyed by exact provider/model (e.g. grok-cli/grok-4.5).
     ticketId = await monitor.reserveSlot(opts.parentSignal, {
@@ -325,8 +325,8 @@ export async function spawnJob(opts: {
         `pane ${paneId} · workspace ${workspaceId} · label ${label}\n` +
         `reason: ${resolved.reason}` +
         `${nudgedEnter ? " · Enter nudged" : ""}\n` +
-        `Monitor will inject a herd-result follow-up when done.\n` +
-        (outputRel ? `output=${outputRel}` : ""),
+        `Monitor will deliver a herd-result pointer when the wave finishes.\n` +
+        (outputRel ? `output=${outputRel} (read the file; no full reply paste)` : ""),
       details: {
         handle,
         ticketId,

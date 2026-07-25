@@ -79,6 +79,35 @@ describe("runs + journal", () => {
     mkdirSync(join(runDir, "jobs", "j03"), { recursive: true });
     assert.equal(nextJobId(runDir), "j04");
   });
+
+  it("nextJobId exclusive claims never collide under parallel callers", () => {
+    const sessionDir = mkdtempSync(join(tmpdir(), "herd-sess-"));
+    const { runDir } = createRun(sessionDir, "race");
+    const ids = Array.from({ length: 20 }, () => nextJobId(runDir));
+    assert.equal(new Set(ids).size, 20);
+    assert.deepEqual(ids, [
+      "j01",
+      "j02",
+      "j03",
+      "j04",
+      "j05",
+      "j06",
+      "j07",
+      "j08",
+      "j09",
+      "j10",
+      "j11",
+      "j12",
+      "j13",
+      "j14",
+      "j15",
+      "j16",
+      "j17",
+      "j18",
+      "j19",
+      "j20",
+    ]);
+  });
 });
 
 describe("submit evidence", () => {

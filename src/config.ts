@@ -8,6 +8,8 @@ import type {
   HerdDefaults,
   IsolationMode,
   LocalConfig,
+  LocalWhenFull,
+  ResultDelivery,
 } from "./types.ts";
 
 const DEFAULT_SESSION_DIR = "~/.pi/agent/herd";
@@ -71,6 +73,27 @@ function normalizeBucket(raw: unknown, bucket: Difficulty): CatalogEntry[] {
   return raw.map((item, i) => normalizeEntry(item, i, bucket));
 }
 
+function normalizePreferOn(raw: unknown): Difficulty[] {
+  if (!Array.isArray(raw)) return ["easy", "medium"];
+  const out: Difficulty[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const d = item.trim().toLowerCase();
+    if (isDifficulty(d) && !out.includes(d)) out.push(d);
+  }
+  return out.length ? out : ["easy", "medium"];
+}
+
+function normalizeWhenFull(raw: unknown): LocalWhenFull {
+  // Default queue: burn free private local serially; set "overflow" for paid parallel.
+  if (raw === "overflow") return "overflow";
+  return "queue";
+}
+
+function normalizeResultDelivery(raw: unknown): ResultDelivery {
+  return raw === "full" ? "full" : "pointer";
+}
+
 function normalizeLocal(raw: unknown): LocalConfig {
   const obj =
     raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
@@ -92,6 +115,8 @@ function normalizeLocal(raw: unknown): LocalConfig {
     thinking,
     maxStreams,
     preflight: obj.preflight !== false,
+    preferOn: normalizePreferOn(obj.preferOn),
+    whenFull: normalizeWhenFull(obj.whenFull),
   };
 }
 
@@ -106,7 +131,33 @@ function normalizeDefaults(raw: unknown): HerdDefaults {
         : DEFAULT_TIMEOUT_MS,
     waitForReply: obj.waitForReply === true,
     requireOutput: obj.requireOutput !== false,
+    resultDelivery: normalizeResultDelivery(obj.resultDelivery),
+    // Last-job batch in index triggers one parent turn when true (default).
+    triggerTurnOnResult: obj.triggerTurnOnResult !== false,
   };
+}
+
+/** Ensure local-tagged entry is first in a bucket (preferOn routing). */
+function promoteLocalInBucket(
+  bucket: CatalogEntry[],
+  local: LocalConfig,
+): CatalogEntry[] {
+  const localEntry: CatalogEntry = {
+    model: local.model,
+    thinking: local.thinking,
+    local: true,
+  };
+  const withoutDup = bucket.filter(
+    (e) => !(e.local === true && e.model === local.model),
+  );
+  const idx = withoutDup.findIndex(
+    (e) => e.local === true || e.model === local.model,
+  );
+  if (idx >= 0) {
+    const promoted = { ...withoutDup[idx]!, local: true as const };
+    return [promoted, ...withoutDup.filter((_, i) => i !== idx)];
+  }
+  return [localEntry, ...withoutDup];
 }
 
 /** Parse a herd.json object into a validated HerdConfig. */
@@ -131,32 +182,17 @@ export function parseHerdConfig(raw: unknown): HerdConfig {
 
   const local = normalizeLocal(obj.local);
   let easy = normalizeBucket(obj.easy, "easy");
-  const medium = normalizeBucket(obj.medium, "medium");
-  const hard = normalizeBucket(obj.hard, "hard");
+  let medium = normalizeBucket(obj.medium, "medium");
+  let hard = normalizeBucket(obj.hard, "hard");
 
-  // Ensure local model appears first in easy when enabled and tagged.
+  // Prefer local first on configured difficulties (default easy+medium).
+  // hard stays frontier-only unless preferOn explicitly includes it.
   if (local.enabled) {
-    const localEntry: CatalogEntry = {
-      model: local.model,
-      thinking: local.thinking,
-      local: true,
-    };
-    const withoutDup = easy.filter(
-      (e) => !(e.local && e.model === local.model),
-    );
-    const hasLocal = easy.some((e) => e.local === true || e.model === local.model);
-    if (!hasLocal) {
-      easy = [localEntry, ...withoutDup];
-    } else {
-      // Promote first local-tagged (or matching model) entry to front + ensure local:true
-      const idx = easy.findIndex(
-        (e) => e.local === true || e.model === local.model,
-      );
-      if (idx >= 0) {
-        const promoted = { ...easy[idx]!, local: true };
-        easy = [promoted, ...easy.filter((_, i) => i !== idx)];
-      }
+    if (local.preferOn.includes("easy")) easy = promoteLocalInBucket(easy, local);
+    if (local.preferOn.includes("medium")) {
+      medium = promoteLocalInBucket(medium, local);
     }
+    if (local.preferOn.includes("hard")) hard = promoteLocalInBucket(hard, local);
   }
 
   if (easy.length === 0 && medium.length === 0 && hard.length === 0) {
@@ -224,6 +260,9 @@ export function defaultConfigObject(): Record<string, unknown> {
       thinking: "medium",
       maxStreams: 1,
       preflight: true,
+      preferOn: ["easy", "medium"],
+      // queue = burn free local GPU serially; overflow = paid remote when local busy
+      whenFull: "queue",
     },
     easy: [
       {
@@ -257,6 +296,8 @@ export function defaultConfigObject(): Record<string, unknown> {
       timeoutMs: DEFAULT_TIMEOUT_MS,
       waitForReply: false,
       requireOutput: true,
+      resultDelivery: "pointer",
+      triggerTurnOnResult: true,
     },
   };
 }

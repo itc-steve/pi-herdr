@@ -17,6 +17,22 @@ describe("createLocalStreamLock", () => {
     assert.equal(lock.tryAcquire("b"), true);
     assert.equal(lock.tryAcquire("c"), false);
   });
+
+  it("acquire queues until release", async () => {
+    const lock = createLocalStreamLock(1);
+    assert.equal(lock.tryAcquire("a"), true);
+    let got = false;
+    const p = lock.acquire("b").then(() => {
+      got = true;
+    });
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(got, false);
+    assert.equal(lock.queued(), 1);
+    lock.release("a");
+    await p;
+    assert.equal(got, true);
+    assert.equal(lock.inUse(), 1);
+  });
 });
 
 describe("createMonitorSlots (per model)", () => {

@@ -6,9 +6,17 @@
 export function createLocalStreamLock(maxStreams = 1) {
   let max = Math.max(1, Math.floor(maxStreams));
   const holders = new Set<string>();
+  const waiters: Array<{
+    jobId: string;
+    resolve: () => void;
+    reject: (err: Error) => void;
+    signal?: AbortSignal;
+    onAbort?: () => void;
+  }> = [];
 
   function setMaxStreams(n: number) {
     max = Math.max(1, Math.floor(n));
+    pump();
   }
 
   function inUse(): number {
@@ -23,6 +31,10 @@ export function createLocalStreamLock(maxStreams = 1) {
     return holders.size >= max;
   }
 
+  function queued(): number {
+    return waiters.length;
+  }
+
   function tryAcquire(jobId: string): boolean {
     if (holders.has(jobId)) return false;
     if (holders.size >= max) return false;
@@ -30,26 +42,95 @@ export function createLocalStreamLock(maxStreams = 1) {
     return true;
   }
 
+  /** Wait for a free local seat (whenFull=queue). */
+  function acquire(jobId: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new Error("Aborted"));
+    if (tryAcquire(jobId)) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const entry: (typeof waiters)[number] = { jobId, resolve, reject, signal };
+      const onAbort = () => {
+        const idx = waiters.indexOf(entry);
+        if (idx !== -1) waiters.splice(idx, 1);
+        reject(new Error("Aborted"));
+      };
+      entry.onAbort = onAbort;
+      signal?.addEventListener("abort", onAbort, { once: true });
+      waiters.push(entry);
+    });
+  }
+
+  function pump() {
+    let i = 0;
+    while (i < waiters.length) {
+      const next = waiters[i]!;
+      if (next.signal?.aborted) {
+        waiters.splice(i, 1);
+        if (next.onAbort && next.signal) {
+          next.signal.removeEventListener("abort", next.onAbort);
+        }
+        next.reject(new Error("Aborted"));
+        continue;
+      }
+      if (holders.has(next.jobId)) {
+        waiters.splice(i, 1);
+        if (next.onAbort && next.signal) {
+          next.signal.removeEventListener("abort", next.onAbort);
+        }
+        next.resolve();
+        continue;
+      }
+      if (holders.size >= max) {
+        i += 1;
+        continue;
+      }
+      waiters.splice(i, 1);
+      if (next.onAbort && next.signal) {
+        next.signal.removeEventListener("abort", next.onAbort);
+      }
+      holders.add(next.jobId);
+      next.resolve();
+    }
+  }
+
   function release(jobId: string) {
     holders.delete(jobId);
+    pump();
+  }
+
+  function abortWaiters(reason = "Aborted") {
+    while (waiters.length) {
+      const w = waiters.shift()!;
+      if (w.onAbort && w.signal) {
+        w.signal.removeEventListener("abort", w.onAbort);
+      }
+      w.reject(new Error(reason));
+    }
   }
 
   function snapshot() {
-    return { holders: [...holders], max };
+    return {
+      holders: [...holders],
+      max,
+      queued: waiters.map((w) => w.jobId),
+    };
   }
 
   function restore(snap: { holders?: string[]; max?: number }) {
     holders.clear();
     if (typeof snap.max === "number" && snap.max >= 1) max = Math.floor(snap.max);
     for (const h of snap.holders ?? []) holders.add(h);
+    pump();
   }
 
   return {
     inUse,
     maxStreamsCount,
     isFull,
+    queued,
     tryAcquire,
+    acquire,
     release,
+    abortWaiters,
     snapshot,
     restore,
     setMaxStreams,

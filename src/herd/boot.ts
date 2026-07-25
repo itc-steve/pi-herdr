@@ -426,10 +426,14 @@ export async function submitTaskToPane(opts: {
     const status = pane ? normalizeStatus(pane.agent_status) : "unknown";
     const elapsed = Date.now() - started;
 
+    // Nudge Enter when idle/done, and also on "unknown" — status detection can
+    // lag right after boot under parallel spawns, leaving the kick in the editor.
+    const mayNeedEnter =
+      isAgentAcceptingInput(status) || status === "unknown";
     if (
       !nudgedEnter &&
       elapsed >= POST_SUBMIT_ENTER_RETRY_MS &&
-      isAgentAcceptingInput(status)
+      mayNeedEnter
     ) {
       await opts.herdr.sendKeys(opts.paneId, ["Enter"], opts.signal);
       nudgedEnter = true;
@@ -437,7 +441,7 @@ export async function submitTaskToPane(opts: {
       nudgedEnter &&
       !nudgedEnterTwice &&
       elapsed >= POST_SUBMIT_ENTER_RETRY_MS_2 &&
-      isAgentAcceptingInput(status)
+      mayNeedEnter
     ) {
       // Second Enter: first may only insert a blank line after a trailing newline.
       await opts.herdr.sendKeys(opts.paneId, ["Enter"], opts.signal);
@@ -640,17 +644,35 @@ export function formatHerdResultMessage(opts: {
   owns?: string[];
   reply?: string;
   error?: string;
+  /** pointer (default): no full reply paste when output exists. full: include reply. */
+  resultDelivery?: "pointer" | "full";
 }): string {
+  const delivery = opts.resultDelivery ?? "pointer";
   const lines = [
     `Herd ${opts.jobId} (${opts.label}) ${opts.status}`,
     `difficulty=${opts.difficulty} model=${opts.model}:${opts.thinking}`,
     `task: ${opts.taskPreview}`,
   ];
   if (opts.runId) lines.push(`run: ${opts.runId}`);
-  if (opts.outputPath) lines.push(`output: ${opts.outputPath}`);
+  if (opts.outputPath) {
+    lines.push(`output: ${opts.outputPath}`);
+    if (delivery === "pointer") {
+      lines.push(
+        "Artifact on disk — read the file if needed; do not re-derive or reassess the whole task.",
+      );
+    }
+  }
   if (opts.owns?.length) lines.push(`owns: ${opts.owns.join(", ")}`);
-  if (opts.reply) {
-    lines.push("", "── reply ──", opts.reply);
+
+  const includeReply =
+    Boolean(opts.reply) &&
+    (delivery === "full" || !opts.outputPath);
+  if (includeReply && opts.reply) {
+    const reply =
+      opts.reply.length > 4_000
+        ? `${opts.reply.slice(0, 4_000)}\n…(truncated)`
+        : opts.reply;
+    lines.push("", "── reply ──", reply);
   }
   if (opts.error) {
     lines.push("", "── error ──", opts.error);

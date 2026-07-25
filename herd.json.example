@@ -6,7 +6,9 @@
     "model": "vllm/Qwen/Qwen3.6-27B-FP8",
     "thinking": "medium",
     "maxStreams": 1,
-    "preflight": true
+    "preflight": true,
+    "preferOn": ["easy", "medium"],
+    "whenFull": "queue"
   },
   "easy": [
     {
@@ -39,6 +41,8 @@
     "isolation": "none",
     "timeoutMs": 600000,
     "waitForReply": false,
-    "requireOutput": true
+    "requireOutput": true,
+    "resultDelivery": "pointer",
+    "triggerTurnOnResult": true
   }
 }

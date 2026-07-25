@@ -15,12 +15,20 @@ export interface CatalogEntry {
   local?: boolean;
 }
 
+export type LocalWhenFull = "overflow" | "queue";
+
+export type ResultDelivery = "pointer" | "full";
+
 export interface LocalConfig {
   enabled: boolean;
   model: string;
   thinking: string;
   maxStreams: number;
   preflight: boolean;
+  /** Difficulties that try the local seat first when free. Default: easy+medium. */
+  preferOn: Difficulty[];
+  /** When local streams full: overflow to next catalog model, or queue for the seat. */
+  whenFull: LocalWhenFull;
 }
 
 export interface HerdDefaults {
@@ -28,6 +36,10 @@ export interface HerdDefaults {
   timeoutMs: number;
   waitForReply: boolean;
   requireOutput: boolean;
+  /** herd-result body: pointer (artifact path only) or full reply paste. */
+  resultDelivery: ResultDelivery;
+  /** Start a parent turn when the last in-flight job finishes. */
+  triggerTurnOnResult: boolean;
 }
 
 export interface HerdConfig {

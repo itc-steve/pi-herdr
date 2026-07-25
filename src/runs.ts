@@ -172,12 +172,23 @@ export function nextJobId(runDir: string): string {
     const id = `j${String(n).padStart(2, "0")}`;
     const jobClaim = join(jobsDir, id);
     const sessionFile = join(sessionsDir, `${id}.jsonl`);
-    // Claim dirs were the original intent but never created — also honor
-    // existing session files so we never collide on j01 forever.
-    if (!existsSync(jobClaim) && !existsSync(sessionFile)) {
-      mkdirSync(jobClaim, { recursive: true });
-      return id;
+    // Honor existing session files so we never collide on j01 forever.
+    if (existsSync(sessionFile)) {
+      n += 1;
+      continue;
     }
-    n += 1;
+    try {
+      // Exclusive claim (no recursive) — parallel spawns must not share an id.
+      // mkdir without recursive throws EEXIST if another caller already claimed.
+      mkdirSync(jobClaim);
+      return id;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") {
+        n += 1;
+        continue;
+      }
+      throw err;
+    }
   }
 }

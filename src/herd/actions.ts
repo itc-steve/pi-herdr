@@ -64,7 +64,11 @@ export async function executeHerd(
 
   if (action === "models") {
     ensureHerdConfigFile();
-    const text = formatModelsList(config, runtime.localLock.inUse());
+    const text = formatModelsList(
+      config,
+      runtime.localLock.inUse(),
+      runtime.localLock.queued(),
+    );
     return { text, details: { action } };
   }
 

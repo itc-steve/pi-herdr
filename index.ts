@@ -104,13 +104,14 @@ const HerdParams = Type.Object({
 
 const PROMPT_GUIDELINES = [
   "Scale bottom-up with many herd spawn calls — never one hard job for a whole project.",
-  "easy = narrow cheap steps (summaries, scaffolds, small files). Local vLLM first if free; overflow easy → next easy remote. Do not escalate to hard because local is busy.",
-  "medium = bulk implementation with disjoint owns= in plan.md Parallel lanes.",
-  "hard = reviewers/managers/thinkers (architecture, critique, VERIFY) — not the default implementer.",
-  "Async spawn requires difficulty= + output=. Prefer parallel easy/medium; hard last.",
+  "DEFAULT single discrete tasks to difficulty=easy (local first). Local is free, private, maxStreams=1, clean per-job context — use it for every single-file / single-question / summary / scaffold job.",
+  "medium = multi-file bulk implementation. Local is still preferred when free (preferOn). whenFull=queue waits for the local seat serially instead of burning paid remote — do not escalate to hard because local is busy.",
+  "hard = frontier only: orchestration thinking, architecture, critique, VERIFY — not the default implementer. Parent/orchestrator stays on the frontier model.",
+  "Local seat is one stream: spawn many jobs; herd queues extras on local (whenFull=queue) or overflows (whenFull=overflow). Never force model=local on more than maxStreams jobs.",
+  "Async spawn requires difficulty= + output=. Results arrive as short herd-result POINTERS (read the output file) — do not reassess the whole task when a pointer lands.",
   "Never open-all / ensure loops. Only herd spawn boots panes.",
   "Shared context is run markdown only — panes do not chat to each other.",
-  "Use herdr to view/focus; never herdr-run to assign herd jobs.",
+  "Use herdr to view/focus; never herdr-run to assign herd jobs. Herdr is the user's view; herd assigns work.",
 ];
 
 type StateExtras = {
@@ -185,6 +186,10 @@ export default function (pi: ExtensionAPI) {
     ui.setWidgetLines(monitor?.formatStatusLines() ?? []);
   }
 
+  /** Buffer pointers until the in-flight wave is quiet — one parent turn, not N. */
+  const pendingResults: string[] = [];
+  let resultFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
   monitor = createHerdMonitor({
     getMaxConcurrent: () => {
       refreshConfig();
@@ -221,6 +226,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      refreshConfig();
       const content = formatHerdResultMessage({
         jobId: h.jobId,
         label: h.label,
@@ -234,19 +240,33 @@ export default function (pi: ExtensionAPI) {
         owns: h.owns,
         reply: event.reply,
         error: event.error,
+        resultDelivery: config.defaults.resultDelivery,
       });
 
-      // Defer so we never deliver mid-tool-turn bookkeeping; followUp queues if busy.
-      setTimeout(() => {
-        safeSendFollowUp(holder, content, {
-          customType: "herd-result",
-          details: {
-            jobId: h.jobId,
-            status: event.status,
-            reply: event.reply,
-            error: event.error,
-          },
-        });
+      pendingResults.push(content);
+      // Mid-wave: buffer only (footer shows active monitors). One parent message
+      // when the last in-flight job finishes — avoids N reassess turns.
+      if (state.activeMonitors.size > 0) return;
+      if (resultFlushTimer) return;
+
+      // Defer so we never deliver mid-tool-turn bookkeeping; coalesce concurrent finishes.
+      resultFlushTimer = setTimeout(() => {
+        resultFlushTimer = null;
+        if (!pendingResults.length) return;
+        const batch = pendingResults.splice(0).join("\n\n──\n\n");
+        const triggerTurn = config.defaults.triggerTurnOnResult;
+        if (triggerTurn) {
+          safeSendFollowUp(holder, batch, {
+            customType: "herd-result",
+            triggerTurn: true,
+            details: { batched: true },
+          });
+        } else {
+          safeSendDisplay(holder, batch, {
+            customType: "herd-result",
+            details: { batched: true },
+          });
+        }
       }, 0);
     },
   });
@@ -295,7 +315,7 @@ export default function (pi: ExtensionAPI) {
       "Difficulty-routed Herdr subagents. Scale bottom-up: many easy/medium spawns; " +
       "hard for review/think only. Easy prefers local vLLM when free.",
     promptSnippet:
-      "Subagent herd: bottom-up difficulty (easy→local first, hard=review). Results as herd-result follow-ups.",
+      "Subagent herd: easy/medium→local first (queue or overflow), hard=review. Results as batched herd-result pointers.",
     promptGuidelines: PROMPT_GUIDELINES,
     parameters: HerdParams,
     // Parallel: async spawn returns quickly; wait/collect still share the same tool.
