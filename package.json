@@ -1,7 +1,7 @@
 {
   "name": "@itc-steve/pi-herdr",
   "version": "1.1.0",
-  "description": "Pi extension: Herdr-visible subagent herd — local-first difficulty routing, pointer-batched results, markdown handoffs, and herdr terminal control.",
+  "description": "Pi extension for Herdr-visible subagent herds — local-first preference, single-stream local seat, and difficulty-based model routing.",
   "keywords": [
     "pi-package",
     "pi",

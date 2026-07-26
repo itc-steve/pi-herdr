@@ -1,6 +1,10 @@
 # pi-herdr
 
-Pi extension for **Herdr-visible subagent herds**: local-first difficulty routing, markdown handoff runs, exclusive write lanes, and a structured `herdr` tool for terminal control.
+**Pi extension for Herdr-visible subagent herds — local-first preference, single-stream local seat, and difficulty-based model routing.**
+
+Markdown handoff runs, exclusive write lanes, and a structured `herdr` tool for terminal control.
+
+![Herdr workspace with a multi-agent herd: leader pane orchestrating completed workers while a hard review job spawns](./Screenshots/Screenshot01.jpg)
 
 **Design intent**
 
