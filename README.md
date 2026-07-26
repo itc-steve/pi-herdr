@@ -1,6 +1,6 @@
 # pi-herdr
 
-**Pi extension for Herdr-visible subagent herds — local-first preference, single-stream local seat, and difficulty-based model routing.**
+**Pi extension for Herdr-visible subagent herds - local-first preference, single-stream local seat, and difficulty-based model routing.**
 
 Markdown handoff runs, exclusive write lanes, and a structured `herdr` tool for terminal control.
 
@@ -11,7 +11,7 @@ Markdown handoff runs, exclusive write lanes, and a structured `herdr` tool for 
 | Role | Who |
 | ---- | --- |
 | Orchestration / multi-task / review | Frontier model (parent session) |
-| Single discrete tasks | **Local seat** — private, free, `maxStreams: 1`, clean per-job context |
+| Single discrete tasks | **Local seat** - private, free, `maxStreams: 1`, clean per-job context |
 | User view / permissions | [Herdr](https://herdr.dev) panes (watch, focus, accept) |
 
 Requires running **inside [Herdr](https://herdr.dev)** (`HERDR_ENV=1`). Outside Herdr, `herd` still loads for config/status, but spawn/boot and the `herdr` tool are inactive.
@@ -94,7 +94,7 @@ Edit model ids to match your Pi providers.
 | `defaults.resultDelivery` | `pointer` (default: path only) or `full` (paste reply) |
 | `defaults.triggerTurnOnResult` | One parent turn when the last in-flight job finishes (default true) |
 
-The `local` block is a **concurrency policy** (one stream, clean context) — usually a private GPU, but any model tagged `"local": true` can own the seat.
+The `local` block is a **concurrency policy** (one stream, clean context) - usually a private GPU, but any model tagged `"local": true` can own the seat.
 
 ### Escape hatches
 
@@ -113,9 +113,9 @@ The `local` block is a **concurrency policy** (one stream, clean context) — us
 | ---------- | ------- | ------- |
 | **easy** | **Default** single discrete tasks | Local first when free (`preferOn`); then `whenFull` queue or overflow |
 | **medium** | Multi-file bulk with disjoint write lanes | Local first when free (default `preferOn`); else catalog |
-| **hard** | Architecture, critique, VERIFY — **not** the default implementer | Frontier catalog only (unless `preferOn` includes hard) |
+| **hard** | Architecture, critique, VERIFY - **not** the default implementer | Frontier catalog only (unless `preferOn` includes hard) |
 
-**Never** dump a whole project on one `difficulty=hard` spawn. Decompose; promote only when needed. Local busy does **not** escalate difficulty — it queues or overflows inside the same bucket.
+**Never** dump a whole project on one `difficulty=hard` spawn. Decompose; promote only when needed. Local busy does **not** escalate difficulty - it queues or overflows inside the same bucket.
 
 Default single-file / summarize / scaffold work to **`difficulty=easy`**. Keep the parent on a frontier model for orchestration; herd workers do the narrow work with clean per-job sessions.
 
@@ -138,7 +138,7 @@ Default single-file / summarize / scaffold work to **`difficulty=easy`**. Keep t
   <your output=.md files>
 ```
 
-Shared context is **markdown only** — panes do not chat to each other. Panes stay open after success so you can watch or intervene in Herdr.
+Shared context is **markdown only** - panes do not chat to each other. Panes stay open after success so you can watch or intervene in Herdr.
 
 ### Write lanes
 
@@ -148,9 +148,9 @@ Multi-writer fan-out requires disjoint `owns=` (and optional `forbid=`). Put **P
 
 Async jobs are monitored in the background.
 
-- Mid-wave: footer only (`herd: N mon +local M`) — **no** parent turn.
+- Mid-wave: footer only (`herd: N mon +local M`) - **no** parent turn.
 - When the **last** in-flight job finishes: **one** batched `herd-result` with short **pointers** (`output=path`), not full reply pastes.
-- Parent should **read the artifact** if it needs content — do not reassess the whole task from a pointer.
+- Parent should **read the artifact** if it needs content - do not reassess the whole task from a pointer.
 - Use `herd wait` / `herd collect` for a sync barrier. Set `resultDelivery=full` only if you need reply bodies in-session.
 
 ## Tools
@@ -160,7 +160,7 @@ Async jobs are monitored in the background.
 | `herd` | Assign / abort / steer / status difficulty-routed subagents |
 | `herdr` | View and control Herdr terminals (workspaces, tabs, panes, worktrees) |
 
-**Rule:** assign work with `herd`. Use `herdr` to view/focus/read — never `herdr run` into a herd job pane to assign work.
+**Rule:** assign work with `herd`. Use `herdr` to view/focus/read - never `herdr run` into a herd job pane to assign work.
 
 ### `herd` actions
 
@@ -202,7 +202,7 @@ herd spawn difficulty=easy model=claude-code/claude-sonnet-5 task="…" output=n
 
 ### `herdr` (view / control)
 
-Registered only when `HERDR_ENV` and `HERDR_PANE_ID` are set (Herdr-managed pane). Actions include workspace/tab/pane lifecycle, `read` / `watch` / `wait_agent`, `run` / `send` / `stop`, worktrees, and notifications. Prefer friendly aliases or ids from `herdr list` — never invent pane ids.
+Registered only when `HERDR_ENV` and `HERDR_PANE_ID` are set (Herdr-managed pane). Actions include workspace/tab/pane lifecycle, `read` / `watch` / `wait_agent`, `run` / `send` / `stop`, worktrees, and notifications. Prefer friendly aliases or ids from `herdr list` - never invent pane ids.
 
 ## Skills
 
