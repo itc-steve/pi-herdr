@@ -1,6 +1,6 @@
 {
   "name": "@itc-steve/pi-herdr",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Pi extension for Herdr-visible subagent herds - local-first preference, single-stream local seat, and difficulty-based model routing.",
   "keywords": [
     "pi-package",
