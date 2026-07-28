@@ -2,6 +2,21 @@
 
 All notable changes to `@itc-steve/pi-herdr` are documented here.
 
+## [1.1.2] — 2026-07-26
+
+### Docs & config
+
+- `herd.json.example` and README: updated model catalog to current recommended defaults
+  - **easy**: `vllm/Qwen/Qwen3.6-27B-FP8` (local) + `openai-codex/gpt-5.6-luna`
+  - **medium**: `grok-cli/grok-4.5` + `openai-codex/gpt-5.6-terra`
+  - **hard**: `claude-code/claude-opus-5` + `openai-codex/gpt-5.6-sol`
+
+## [1.1.1] — 2026-07-25
+
+### Docs
+
+- README: remove em dashes for cleaner formatting.
+
 ## [1.1.0] — 2026-07-25
 
 ### Local-first routing

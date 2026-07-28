@@ -17,23 +17,27 @@
       "local": true
     },
     {
-      "model": "claude-code/claude-sonnet-5",
+      "model": "openai-codex/gpt-5.6-luna",
       "thinking": "medium"
     }
   ],
   "medium": [
     {
-      "model": "grok-cli/grok-build",
+      "model": "grok-cli/grok-4.5",
+      "thinking": "medium"
+    },
+    {
+      "model": "openai-codex/gpt-5.6-terra",
       "thinking": "medium"
     }
   ],
   "hard": [
     {
-      "model": "grok-cli/grok-4.5",
+      "model": "claude-code/claude-opus-5",
       "thinking": "high"
     },
     {
-      "model": "claude-code/claude-opus-4-8",
+      "model": "openai-codex/gpt-5.6-sol",
       "thinking": "high"
     }
   ],

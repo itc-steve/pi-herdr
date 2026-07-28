@@ -57,14 +57,15 @@ Copy [herd.json.example](./herd.json.example) to `~/.pi/agent/herd.json` (create
   },
   "easy": [
     { "model": "vllm/Qwen/Qwen3.6-27B-FP8", "thinking": "medium", "local": true },
-    { "model": "claude-code/claude-sonnet-5", "thinking": "medium" }
+    { "model": "openai-codex/gpt-5.6-luna", "thinking": "medium" }
   ],
   "medium": [
-    { "model": "grok-cli/grok-build", "thinking": "medium" }
+    { "model": "grok-cli/grok-4.5", "thinking": "medium" },
+    { "model": "openai-codex/gpt-5.6-terra", "thinking": "medium" }
   ],
   "hard": [
-    { "model": "grok-cli/grok-4.5", "thinking": "high" },
-    { "model": "claude-code/claude-opus-4-8", "thinking": "high" }
+    { "model": "claude-code/claude-opus-5", "thinking": "high" },
+    { "model": "openai-codex/gpt-5.6-sol", "thinking": "high" }
   ],
   "defaults": {
     "isolation": "none",
@@ -187,7 +188,7 @@ herd spawn difficulty=hard task="Review progress-*.md; note gaps" output=progres
 Exact model override still requires difficulty:
 
 ```text
-herd spawn difficulty=easy model=claude-code/claude-sonnet-5 task="…" output=notes.md
+herd spawn difficulty=easy model=openai-codex/gpt-5.6-luna task="…" output=notes.md
 ```
 
 ### Slash
