@@ -2,6 +2,15 @@
 
 All notable changes to `@itc-steve/pi-herdr` are documented here.
 
+## [Unreleased]
+
+### Fixes
+
+- Local seat: `waitForJobIdle` no longer treats a still-working pane as timed out.
+  Monitor `timeoutMs` (default 10 min) was releasing `maxStreams=1` and letting a
+  queued local job start a second vLLM stream. Timeout is now a stall clock —
+  it only fires while the pane is not `working`/`blocked`.
+
 ## [1.1.2] — 2026-07-26
 
 ### Docs & config

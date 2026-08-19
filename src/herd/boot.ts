@@ -472,7 +472,7 @@ export async function waitForJobIdle(opts: {
   signal?: AbortSignal;
 }): Promise<{ status: string; sawBusy: boolean }> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS;
-  const deadline = Date.now() + timeoutMs;
+  let deadline = Date.now() + timeoutMs;
   let sawBusy = false;
   const started = Date.now();
   let useNativeWait = typeof opts.herdr.waitAgentStatus === "function";
@@ -493,7 +493,9 @@ export async function waitForJobIdle(opts: {
     return false;
   }
 
-  while (Date.now() < deadline) {
+  // Stall clock, not job wall-clock: timeoutMs only applies while NOT busy.
+  // A 10min local review must not free the GPU seat under itself.
+  while (true) {
     if (opts.signal?.aborted) throw new Error("Aborted");
 
     const pane = await opts.herdr.getPaneInfo(opts.paneId, opts.signal);
@@ -502,6 +504,7 @@ export async function waitForJobIdle(opts: {
     const status = normalizeStatus(pane.agent_status);
     if (status === "working" || status === "blocked") {
       sawBusy = true;
+      deadline = Date.now() + timeoutMs;
     }
 
     if (status === "idle" || status === "done") {
@@ -524,9 +527,9 @@ export async function waitForJobIdle(opts: {
       }
     }
 
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) break;
+    if (Date.now() >= deadline) break;
 
+    const remaining = deadline - Date.now();
     if (
       useNativeWait &&
       (status === "working" || status === "blocked" || status === "unknown")
@@ -541,7 +544,10 @@ export async function waitForJobIdle(opts: {
         continue;
       } catch (err) {
         if (opts.signal?.aborted || isAbortError(err)) throw err;
-        if (looksLikeTimeoutError(err)) break;
+        if (looksLikeTimeoutError(err)) {
+          // Re-check pane. Still-working slides the deadline next iteration.
+          continue;
+        }
         useNativeWait = false;
       }
     }
