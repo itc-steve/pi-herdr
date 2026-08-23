@@ -2,7 +2,7 @@
 
 All notable changes to `@itc-steve/pi-herdr` are documented here.
 
-## [Unreleased]
+## [1.3.0] — 2026-08-23
 
 ### Added
 
