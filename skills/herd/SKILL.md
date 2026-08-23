@@ -80,4 +80,4 @@ Markdown in the run directory only. Panes do not talk to each other.
 
 ## Session policy
 
-Each job gets a fresh `runs/<id>/sessions/<job>.jsonl`. Panes stay open after success.
+Each job gets a fresh `runs/<id>/sessions/<job>.jsonl`. Spawns open background tabs in the parent's current workspace; tabs stay open after success.

@@ -4,7 +4,9 @@
  * Pattern from pi-dynamic-workflows result delivery:
  * - keep a mutable `{ pi }` so /reload can refresh the active API
  * - swallow sync + async send failures (stale ctx after reload)
- * - background results use followUp + triggerTurn (never interrupt a busy turn)
+ * - background results use followUp + triggerTurn only when the parent is idle.
+ *   A busy parent already has the wave in-flight; triggerTurn would start a
+ *   second turn after it settles ("already reading the final state").
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -23,6 +25,14 @@ export type FollowUpOptions = {
 
 export function createPiHolder(pi: ExtensionAPI): PiHolder {
   return { pi };
+}
+
+/** Auto-turn only when enabled AND parent is idle at job completion. */
+export function shouldTriggerParentTurn(
+  enabled: boolean,
+  parentIdle: boolean,
+): boolean {
+  return enabled && parentIdle;
 }
 
 /** Refresh the live API after session_start / reload. */

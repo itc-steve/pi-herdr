@@ -139,7 +139,7 @@ Default single-file / summarize / scaffold work to **`difficulty=easy`**. Keep t
   <your output=.md files>
 ```
 
-Shared context is **markdown only** - panes do not chat to each other. Panes stay open after success so you can watch or intervene in Herdr.
+Shared context is **markdown only** - panes do not chat to each other. Each spawn opens a background tab in the parent's current workspace. Job tabs stay open after success so you can watch or intervene in Herdr.
 
 ### Write lanes
 

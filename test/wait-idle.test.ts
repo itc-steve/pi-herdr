@@ -76,4 +76,17 @@ describe("waitForJobIdle", () => {
       /Timed out waiting/,
     );
   });
+
+  it("treats done as finished like idle", async () => {
+    const t0 = Date.now();
+    const getStatus = (): AgentStatus =>
+      Date.now() - t0 < 80 ? "working" : "done";
+    const result = await waitForJobIdle({
+      herdr: herdr(getStatus),
+      paneId: "p1",
+      timeoutMs: 30,
+    });
+    assert.equal(result.status, "done");
+    assert.equal(result.sawBusy, true);
+  });
 });

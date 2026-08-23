@@ -295,13 +295,13 @@ export async function spawnJob(opts: {
       }
     }
 
-    // Async: attach monitor; release local lock when monitor completes
+    // Async monitor outlives this tool call. Tool-batch cancellation must not
+    // abort it and release a local seat while the pane is still working.
     const onDoneLocal = localHeld;
     const monJob = monitor.attachAndWatch({
       ticketId,
       handle,
       timeoutMs: timeoutMs || DEFAULT_DISPATCH_TIMEOUT_MS,
-      parentSignal: opts.parentSignal,
     });
 
     // Patch monitor completion to release local + journal + clear active

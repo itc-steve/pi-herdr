@@ -81,6 +81,20 @@ export function normalizeStatus(raw: string | undefined): AgentStatus {
   return "unknown";
 }
 
+/** `done` = settled but unseen; `idle` = settled and seen. Both accept input. */
+export function isSettledStatus(status: AgentStatus): boolean {
+  return status === "idle" || status === "done";
+}
+
+/** True when `actual` satisfies any of `wanted`. idle and done are equivalent. */
+export function statusMatches(
+  actual: AgentStatus,
+  wanted: readonly AgentStatus[],
+): boolean {
+  if (wanted.includes(actual)) return true;
+  return isSettledStatus(actual) && wanted.some(isSettledStatus);
+}
+
 export function agentDisplayName(agent: AgentInfo): string {
   return agent.name || agent.display_agent || agent.agent || agent.pane_id;
 }
@@ -238,6 +252,39 @@ export function createHerdrClient(exec: HerdrExecFn) {
     return response.result!.layout;
   }
 
+  async function createTab(
+    opts: { workspaceId: string; label: string; cwd: string },
+    signal?: AbortSignal,
+  ): Promise<{ tab: TabInfo; paneId: string }> {
+    const response = await execHerdrJson<{
+      result: { tab: TabInfo; root_pane?: PaneInfo };
+    }>(
+      [
+        "tab",
+        "create",
+        "--workspace",
+        opts.workspaceId,
+        "--label",
+        opts.label,
+        "--cwd",
+        opts.cwd,
+        "--no-focus",
+      ],
+      signal,
+    );
+    const tab = response.result?.tab;
+    if (!tab?.tab_id) throw new Error("herdr tab create returned no tab");
+    let paneId = response.result?.root_pane?.pane_id;
+    if (!paneId) {
+      const panes = await getPaneList(tab.workspace_id, signal);
+      paneId = panes.find((pane) => pane.tab_id === tab.tab_id)?.pane_id;
+    }
+    if (!paneId) {
+      throw new Error(`herdr tab create '${opts.label}' returned no root pane`);
+    }
+    return { tab, paneId };
+  }
+
   async function createWorkspace(
     opts: { label: string; cwd: string },
     signal?: AbortSignal,
@@ -323,18 +370,15 @@ export function createHerdrClient(exec: HerdrExecFn) {
     signal?: AbortSignal,
   ): Promise<void> {
     const ms = Math.max(1, Math.floor(timeoutMs));
-    await execHerdr(
-      [
-        "wait",
-        "agent-status",
-        paneId,
-        "--status",
-        status,
-        "--timeout",
-        String(ms),
-      ],
-      signal,
-    );
+    const args = ["agent", "wait", paneId, "--timeout", String(ms)];
+    // herdr `wait` is not a command; `agent wait` without --until also matches
+    // blocked. Job completion is idle|done only (blocked = still waiting).
+    if (isSettledStatus(status)) {
+      args.push("--until", "idle", "--until", "done");
+    } else {
+      args.push("--until", status);
+    }
+    await execHerdr(args, signal);
   }
 
   async function waitOutput(
@@ -378,6 +422,7 @@ export function createHerdrClient(exec: HerdrExecFn) {
     getWorkspaceInfo,
     getTabList,
     getPaneLayout,
+    createTab,
     createWorkspace,
     renamePane,
     runInPane,

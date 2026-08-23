@@ -2,6 +2,21 @@
 
 All notable changes to `@itc-steve/pi-herdr` are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Herd subagents now spawn as background tabs in the parent's current workspace instead of creating workspaces.
+
+### Fixes
+
+- Herd-result no longer starts a second parent turn when the parent is already
+  in a turn (it was followUp+triggerTurn after settle — parent already had the
+  final state). `wait_agent` and native `agent wait` treat `done` like `idle`.
+- Async monitors no longer inherit the spawning tool call's abort signal. A
+  cancelled parallel tool batch could release the local seat while its pane was
+  still working, allowing a second local stream to start.
+
 ## [1.2.0] — 2026-08-19
 
 ### Fixes

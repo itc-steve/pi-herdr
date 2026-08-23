@@ -5,6 +5,7 @@ import {
   refreshPiHolder,
   safeSendDisplay,
   safeSendFollowUp,
+  shouldTriggerParentTurn,
 } from "../src/harness/pi-holder.ts";
 import {
   createHerdUiBinder,
@@ -43,6 +44,24 @@ describe("harness pi-holder", () => {
     assert.equal(msg.details.jobId, "j1");
     assert.equal(opts.deliverAs, "followUp");
     assert.equal(opts.triggerTurn, true);
+  });
+
+  it("skips auto-turn when parent is already in a turn", () => {
+    assert.equal(shouldTriggerParentTurn(true, true), true);
+    assert.equal(shouldTriggerParentTurn(true, false), false);
+    assert.equal(shouldTriggerParentTurn(false, true), false);
+  });
+
+  it("safeSendFollowUp honors triggerTurn false", () => {
+    const calls: unknown[] = [];
+    const pi = {
+      sendMessage(msg: unknown, opts?: unknown) {
+        calls.push([msg, opts]);
+      },
+    } as never;
+    safeSendFollowUp(createPiHolder(pi), "done", { triggerTurn: false });
+    const opts = (calls[0] as [unknown, { triggerTurn: boolean }])[1];
+    assert.equal(opts.triggerTurn, false);
   });
 
   it("safeSendFollowUp swallows sync throw and rejects", async () => {

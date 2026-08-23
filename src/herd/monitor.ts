@@ -293,7 +293,6 @@ export function createHerdMonitor(opts: {
     ticketId: string;
     handle: JobHandle;
     timeoutMs?: number;
-    parentSignal?: AbortSignal;
   }): MonitorJob {
     const herdr = opts.herdr();
     if (!herdr) {
@@ -316,15 +315,6 @@ export function createHerdMonitor(opts: {
 
     const ac = controllers.get(job.id) ?? new AbortController();
     controllers.set(job.id, ac);
-
-    if (optsWatch.parentSignal) {
-      if (optsWatch.parentSignal.aborted) ac.abort();
-      else {
-        optsWatch.parentSignal.addEventListener("abort", () => ac.abort(), {
-          once: true,
-        });
-      }
-    }
 
     notifyChange();
 

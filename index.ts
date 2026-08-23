@@ -25,6 +25,7 @@ import {
   refreshPiHolder,
   safeSendDisplay,
   safeSendFollowUp,
+  shouldTriggerParentTurn,
 } from "./src/harness/pi-holder.ts";
 import {
   createHerdUiBinder,
@@ -82,7 +83,7 @@ const HerdParams = Type.Object({
     }),
   ),
   thinking: Type.Optional(Type.String()),
-  label: Type.Optional(Type.String({ description: "Herdr pane/space label" })),
+  label: Type.Optional(Type.String({ description: "Herdr job tab/pane label" })),
   run: Type.Optional(Type.String({ description: "Handoff run id" })),
   runAction: Type.Optional(RunActionEnum),
   name: Type.Optional(Type.String({ description: "For run create/use/show" })),
@@ -189,6 +190,8 @@ export default function (pi: ExtensionAPI) {
   /** Buffer pointers until the in-flight wave is quiet — one parent turn, not N. */
   const pendingResults: string[] = [];
   let resultFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Parent session idle? Captured at job complete so a busy turn isn't followed by a second one. */
+  let parentIdle = true;
 
   monitor = createHerdMonitor({
     getMaxConcurrent: () => {
@@ -200,6 +203,8 @@ export default function (pi: ExtensionAPI) {
       refreshSurfaces();
     },
     onComplete: async (event) => {
+      // Capture before journal I/O — parent may settle in that window.
+      const parentIdleAtComplete = parentIdle;
       const h = event.job.handle;
       state.activeMonitors.delete(h.jobId);
       if (state._localHeld?.has(h.jobId)) {
@@ -254,19 +259,16 @@ export default function (pi: ExtensionAPI) {
         resultFlushTimer = null;
         if (!pendingResults.length) return;
         const batch = pendingResults.splice(0).join("\n\n──\n\n");
-        const triggerTurn = config.defaults.triggerTurnOnResult;
-        if (triggerTurn) {
-          safeSendFollowUp(holder, batch, {
-            customType: "herd-result",
-            triggerTurn: true,
-            details: { batched: true },
-          });
-        } else {
-          safeSendDisplay(holder, batch, {
-            customType: "herd-result",
-            details: { batched: true },
-          });
-        }
+        // triggerTurn false → append only. Display-only sendMessage while
+        // streaming would steer (pi treats missing triggerTurn as true).
+        safeSendFollowUp(holder, batch, {
+          customType: "herd-result",
+          triggerTurn: shouldTriggerParentTurn(
+            config.defaults.triggerTurnOnResult,
+            parentIdleAtComplete,
+          ),
+          details: { batched: true },
+        });
       }, 0);
     },
   });
@@ -289,6 +291,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     refreshPiHolder(holder, pi);
+    parentIdle = ctx.isIdle?.() !== false;
     // Only arm tools that this factory actually registered.
     ensureHerdToolsActive(
       pi,
@@ -297,7 +300,13 @@ export default function (pi: ExtensionAPI) {
     refreshSurfaces(ctx);
   });
 
+  pi.on("agent_start", async (_event, ctx) => {
+    parentIdle = false;
+    refreshSurfaces(ctx);
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
+    parentIdle = true;
     refreshSurfaces(ctx);
   });
 

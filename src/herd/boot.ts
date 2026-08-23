@@ -163,7 +163,7 @@ export async function waitForShellReady(
 
   throw new Error(
     `Timed out waiting for shell prompt in pane ${paneId} before boot. ` +
-      `New spaces need the shell (and any banner) to finish before \`pi\` is launched.`,
+      `New tabs need the shell (and any banner) to finish before \`pi\` is launched.`,
   );
 }
 
@@ -269,9 +269,7 @@ export async function bootIntoPane(opts: {
   return waitUntilAgentReady(opts.herdr, opts.paneId, remaining(), opts.signal);
 }
 
-/**
- * Create a labeled workspace (--no-focus) and boot pi into its root pane.
- */
+/** Create a labeled tab (--no-focus) in the current workspace and boot pi. */
 export async function createAndBootJob(opts: {
   herdr: HerdrClient;
   label: string;
@@ -282,44 +280,34 @@ export async function createAndBootJob(opts: {
   signal?: AbortSignal;
 }): Promise<{ paneId: string; workspaceId: string }> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
-
-  // Reuse existing space with this label if present
-  const spaces = await opts.herdr.getWorkspaceList(opts.signal);
-  const matches = spaces.filter((w) => (w.label || "").trim() === opts.label);
+  const currentPane = await opts.herdr.getCurrentPaneInfo(opts.signal);
+  const workspaceId = currentPane.workspace_id;
+  const tabs = await opts.herdr.getTabList(workspaceId, opts.signal);
+  const matches = tabs.filter((tab) => (tab.label || "").trim() === opts.label);
   if (matches.length > 1) {
     throw new Error(
-      `Ambiguous workspaces labeled '${opts.label}': ` +
-        `${matches.map((w) => w.workspace_id).join(", ")}. Rename or close extras.`,
+      `Ambiguous tabs labeled '${opts.label}' in workspace ${workspaceId}: ` +
+        `${matches.map((tab) => tab.tab_id).join(", ")}. Rename or close extras.`,
     );
   }
 
   let paneId: string;
-  let workspaceId: string;
-
   if (matches[0]) {
-    workspaceId = matches[0].workspace_id;
-    const panes = await opts.herdr.getPaneList(workspaceId, opts.signal);
+    const panes = (await opts.herdr.getPaneList(workspaceId, opts.signal)).filter(
+      (pane) => pane.tab_id === matches[0]!.tab_id,
+    );
     const labeled =
-      panes.find((p) => (p.label || "").trim() === opts.label) ?? panes[0];
-    if (!labeled) {
-      throw new Error(`Workspace '${opts.label}' has no pane`);
-    }
+      panes.find((pane) => (pane.label || "").trim() === opts.label) ?? panes[0];
+    if (!labeled) throw new Error(`Tab '${opts.label}' has no pane`);
     paneId = labeled.pane_id;
-
     if (paneHasAgent(labeled)) {
-      // Quit existing agent so we can boot onto our per-job session
-      await stopAgentInPane({
-        herdr: opts.herdr,
-        paneId,
-        signal: opts.signal,
-      });
+      await stopAgentInPane({ herdr: opts.herdr, paneId, signal: opts.signal });
     }
   } else {
-    const created = await opts.herdr.createWorkspace(
-      { label: opts.label, cwd: opts.cwd },
+    const created = await opts.herdr.createTab(
+      { workspaceId, label: opts.label, cwd: opts.cwd },
       opts.signal,
     );
-    workspaceId = created.workspace.workspace_id;
     paneId = created.paneId;
   }
 

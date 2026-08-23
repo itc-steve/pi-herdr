@@ -6,6 +6,7 @@ import { Type } from "typebox";
 import { resolvePaneRefByLabel, resolveTabRef, resolveWorkspaceRef } from "./resolve.ts";
 import {
 	createHerdrClient,
+	statusMatches,
 	type PaneLayoutSnapshot,
 	type SplitDirection,
 	type TabInfo,
@@ -1195,8 +1196,8 @@ export function registerHerdrTool(pi: ExtensionAPI): void {
 
 						const satisfied =
 							mode === "all"
-								? snapshot.every((item) => statuses.includes(item.status))
-								: snapshot.some((item) => statuses.includes(item.status));
+								? snapshot.every((item) => statusMatches(item.status, statuses))
+								: snapshot.some((item) => statusMatches(item.status, statuses));
 						if (satisfied) break;
 						if (deadline != null && Date.now() >= deadline) {
 							throw new Error(
