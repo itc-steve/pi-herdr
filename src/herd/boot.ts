@@ -508,7 +508,9 @@ export async function waitForJobIdle(opts: {
           opts.outputPath &&
           !isOutputReady(opts.outputPath, opts.outputBaselineBytes)
         ) {
-          await sleep(OUTPUT_SETTLE_POLL_MS, opts.signal);
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          await sleep(Math.min(OUTPUT_SETTLE_POLL_MS, remaining), opts.signal);
           continue;
         }
         return { status, sawBusy };

@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { waitForJobIdle } from "../src/herd/boot.ts";
 import type { HerdrClient } from "../src/herdr/client.ts";
 import type { AgentStatus, PaneInfo } from "../src/types.ts";
@@ -88,5 +91,23 @@ describe("waitForJobIdle", () => {
     });
     assert.equal(result.status, "done");
     assert.equal(result.sawBusy, true);
+  });
+
+  it("fails when pane settles without writing its required output", async () => {
+    const t0 = Date.now();
+    const getStatus = (): AgentStatus =>
+      Date.now() - t0 < 20 ? "working" : "idle";
+
+    await assert.rejects(
+      () =>
+        waitForJobIdle({
+          herdr: herdr(getStatus),
+          paneId: "p1",
+          outputPath: join(tmpdir(), `pi-herdr-missing-${randomUUID()}.md`),
+          timeoutMs: 30,
+          signal: AbortSignal.timeout(200),
+        }),
+      /output file is empty\/unchanged/,
+    );
   });
 });

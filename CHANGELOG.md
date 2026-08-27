@@ -2,6 +2,12 @@
 
 All notable changes to `@itc-steve/pi-herdr` are documented here.
 
+## [1.3.1] — 2026-08-27
+
+### Fixes
+
+- Output-backed jobs now respect their timeout while waiting for a required output file, instead of overshooting short deadlines by the output polling interval.
+
 ## [1.3.0] — 2026-08-23
 
 ### Added
