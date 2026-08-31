@@ -21,7 +21,7 @@ export async function preflightLocalModel(opts: {
   if (!ok) {
     throw new PreflightError(
       `Local model '${opts.model}' is not available in the Pi model registry. ` +
-        `Start vLLM / fix the model id in ~/.pi/agent/herd.json, or spawn with a non-local easy model.`,
+        `Start vLLM / fix the model id in ~/.pi/agent/herd.json, or spawn with role=think / a non-local model.`,
     );
   }
 }

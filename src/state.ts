@@ -47,7 +47,7 @@ export function formatStatus(
     if (!j) continue;
     const mon = state.activeMonitors.has(id) ? "ACTIVE" : "idle";
     lines.push(
-      `  ${id} ${mon} ${j.difficulty} ${j.model}:${j.thinking}` +
+      `  ${id} ${mon} ${j.role} ${j.model}:${j.thinking}` +
         (j.local ? " [local]" : "") +
         (j.label ? ` (${j.label})` : ""),
     );

@@ -51,7 +51,7 @@ export type JobHandle = {
   model: string;
   thinking: string;
   local: boolean;
-  difficulty: string;
+  role: string;
 };
 
 function isAbortError(err: unknown): boolean {
@@ -631,7 +631,7 @@ export function formatHerdResultMessage(opts: {
   jobId: string;
   label: string;
   status: "done" | "failed" | "aborted";
-  difficulty: string;
+  role: string;
   model: string;
   thinking: string;
   taskPreview: string;
@@ -646,7 +646,7 @@ export function formatHerdResultMessage(opts: {
   const delivery = opts.resultDelivery ?? "pointer";
   const lines = [
     `Herd ${opts.jobId} (${opts.label}) ${opts.status}`,
-    `difficulty=${opts.difficulty} model=${opts.model}:${opts.thinking}`,
+    `role=${opts.role} model=${opts.model}:${opts.thinking}`,
     `task: ${opts.taskPreview}`,
   ];
   if (opts.runId) lines.push(`run: ${opts.runId}`);

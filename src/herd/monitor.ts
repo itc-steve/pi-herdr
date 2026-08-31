@@ -3,6 +3,8 @@
  * Completion: wait idle + output → collect → onComplete (parent follow-up).
  */
 
+import type { CatalogEntry } from "../types.ts";
+import { pickThinkEntry, THINK_PER_MODEL } from "../resolve-model.ts";
 import type { HerdrClient } from "../herdr/client.ts";
 import {
   assertLaneAvailable,
@@ -78,6 +80,7 @@ export function createHerdMonitor(opts: {
   const slotWaiters: Array<{
     ticketId: string;
     model: string;
+    max: number;
     resolve: () => void;
     reject: (err: Error) => void;
     signal?: AbortSignal;
@@ -136,10 +139,49 @@ export function createHerdMonitor(opts: {
     return slotsByModel.get(model)?.size ?? 0;
   }
 
-  function tryGrantSlot(ticketId: string, model: string): boolean {
-    const max = Math.max(1, opts.getMaxConcurrent());
+  /** jobId → model held for think pick before reserveSlot. */
+  const thinkHolds = new Map<string, string>();
+  /** Next think[] index (second opinion / second think task → the other model). */
+  let thinkCursor = 0;
+  /** ticketId → per-model cap used to grant that slot (think=1, else maxModelConcurrent). */
+  const slotCap = new Map<string, number>();
+
+  function thinkLoad(model: string): number {
+    let extra = 0;
+    for (const m of thinkHolds.values()) {
+      if (m === model) extra += 1;
+    }
+    return modelInUse(model) + extra;
+  }
+
+  function claimThinkPick(
+    catalog: CatalogEntry[],
+    max: number,
+    jobId: string,
+  ): { entry: CatalogEntry; queued: boolean } {
+    const existing = thinkHolds.get(jobId);
+    if (existing) {
+      const entry =
+        catalog.find((e) => e.model === existing) ?? catalog[0]!;
+      return { entry, queued: false };
+    }
+    const cap = Math.min(max, THINK_PER_MODEL);
+    const picked = pickThinkEntry(catalog, thinkLoad, cap, thinkCursor);
+    if (!picked.queued) {
+      thinkHolds.set(jobId, picked.entry.model);
+      thinkCursor = picked.nextStart;
+    }
+    return picked;
+  }
+
+  function releaseThinkHold(jobId: string) {
+    thinkHolds.delete(jobId);
+  }
+
+  function tryGrantSlot(ticketId: string, model: string, max?: number): boolean {
+    const cap = Math.max(1, max ?? opts.getMaxConcurrent());
     if (slotModel.has(ticketId)) return true;
-    if (modelInUse(model) >= max) return false;
+    if (modelInUse(model) >= cap) return false;
     let set = slotsByModel.get(model);
     if (!set) {
       set = new Set();
@@ -147,6 +189,7 @@ export function createHerdMonitor(opts: {
     }
     set.add(ticketId);
     slotModel.set(ticketId, model);
+    slotCap.set(ticketId, cap);
     return true;
   }
 
@@ -155,6 +198,7 @@ export function createHerdMonitor(opts: {
     if (!model) return;
     slotModel.delete(ticketId);
     slotsByModel.get(model)?.delete(ticketId);
+    slotCap.delete(ticketId);
     const job = jobs.get(ticketId);
     if (job) job.slotHeld = false;
 
@@ -167,7 +211,7 @@ export function createHerdMonitor(opts: {
         i -= 1;
         continue;
       }
-      const max = Math.max(1, opts.getMaxConcurrent());
+      const max = next.max;
       if (modelInUse(next.model) >= max) continue;
       slotWaiters.splice(i, 1);
       next.resolve();
@@ -179,16 +223,18 @@ export function createHerdMonitor(opts: {
     ticketId: string,
     model: string,
     signal?: AbortSignal,
+    max?: number,
   ): Promise<void> {
+    const cap = Math.max(1, max ?? opts.getMaxConcurrent());
     if (signal?.aborted) throw new Error("Aborted");
-    if (tryGrantSlot(ticketId, model)) {
+    if (tryGrantSlot(ticketId, model, cap)) {
       const job = jobs.get(ticketId);
       if (job) job.slotHeld = true;
       return;
     }
 
     await new Promise<void>((resolve, reject) => {
-      const entry = { ticketId, model, resolve, reject, signal };
+      const entry = { ticketId, model, max: cap, resolve, reject, signal };
       slotWaiters.push(entry);
       const onAbort = () => {
         const idx = slotWaiters.indexOf(entry);
@@ -199,9 +245,9 @@ export function createHerdMonitor(opts: {
     });
 
     if (signal?.aborted) throw new Error("Aborted");
-    if (!tryGrantSlot(ticketId, model)) {
+    if (!tryGrantSlot(ticketId, model, cap)) {
       // Race: another waiter got the seat; re-queue once more via acquire.
-      return acquireSlot(ticketId, model, signal);
+      return acquireSlot(ticketId, model, signal, cap);
     }
     const job = jobs.get(ticketId);
     if (job) {
@@ -221,7 +267,8 @@ export function createHerdMonitor(opts: {
       brief?: string;
       thinking?: string;
       local?: boolean;
-      difficulty?: string;
+      role?: string;
+      slotMax?: number;
     },
   ): Promise<string> {
     const model = lane?.model?.trim();
@@ -248,7 +295,7 @@ export function createHerdMonitor(opts: {
         model,
         thinking: lane?.thinking ?? "",
         local: lane?.local ?? false,
-        difficulty: lane?.difficulty ?? "",
+        role: lane?.role ?? "",
       },
       startedAt: Date.now(),
       brief: lane?.brief ?? "(queued)",
@@ -277,7 +324,7 @@ export function createHerdMonitor(opts: {
 
     notifyChange();
     try {
-      await acquireSlot(ticketId, model, signal);
+      await acquireSlot(ticketId, model, signal, lane?.slotMax);
       placeholder.status = "running";
       notifyChange();
       return ticketId;
@@ -443,6 +490,9 @@ export function createHerdMonitor(opts: {
     inFlightLaneClaims,
     activeCount: () => slotModel.size,
     modelInUse,
+    thinkLoad,
+    claimThinkPick,
+    releaseThinkHold,
   };
 }
 

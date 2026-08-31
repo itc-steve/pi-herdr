@@ -2,7 +2,8 @@
 
 export type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
-export type Difficulty = "easy" | "medium" | "hard";
+/** do = local implementer (default). think = ranked frontier catalog. */
+export type Role = "do" | "think";
 
 export type IsolationMode = "none" | "worktree";
 
@@ -11,11 +12,9 @@ export type SessionPolicy = "per-job";
 export interface CatalogEntry {
   model: string;
   thinking: string;
-  /** When true, consumes a local stream slot (maxStreams). */
+  /** When true, consumes a local stream slot. */
   local?: boolean;
 }
-
-export type LocalWhenFull = "overflow" | "queue";
 
 export type ResultDelivery = "pointer" | "full";
 
@@ -23,12 +22,7 @@ export interface LocalConfig {
   enabled: boolean;
   model: string;
   thinking: string;
-  maxStreams: number;
   preflight: boolean;
-  /** Difficulties that try the local seat first when free. Default: easy+medium. */
-  preferOn: Difficulty[];
-  /** When local streams full: overflow to next catalog model, or queue for the seat. */
-  whenFull: LocalWhenFull;
 }
 
 export interface HerdDefaults {
@@ -45,11 +39,10 @@ export interface HerdDefaults {
 export interface HerdConfig {
   sessionDir: string;
   sessionPolicy: SessionPolicy;
-  maxModelConcurrent: number; // max in-flight jobs per exact provider/model string
+  maxModelConcurrent: number; // local seats AND per exact provider/model string
   local: LocalConfig;
-  easy: CatalogEntry[];
-  medium: CatalogEntry[];
-  hard: CatalogEntry[];
+  /** Ordered frontier rank. Index 0 = best. */
+  think: CatalogEntry[];
   defaults: HerdDefaults;
 }
 
@@ -57,7 +50,7 @@ export interface ResolvedModel {
   model: string;
   thinking: string;
   local: boolean;
-  difficulty: Difficulty;
+  role: Role;
   /** Why this entry was chosen (for logs/tool output). */
   reason: string;
 }
@@ -71,7 +64,7 @@ export interface ManagedJob {
   model: string;
   thinking: string;
   local: boolean;
-  difficulty: Difficulty;
+  role: Role;
   runId: string | null;
   outputPath?: string;
   owns?: string[];
@@ -85,7 +78,7 @@ export interface JournalEntry {
   jobId: string;
   model: string;
   thinking: string;
-  difficulty: Difficulty;
+  role: Role;
   taskPreview: string;
   reads?: string[];
   output?: string;

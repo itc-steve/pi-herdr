@@ -3,19 +3,28 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type {
   CatalogEntry,
-  Difficulty,
   HerdConfig,
   HerdDefaults,
   IsolationMode,
   LocalConfig,
-  LocalWhenFull,
   ResultDelivery,
+  Role,
 } from "./types.ts";
 
 const DEFAULT_SESSION_DIR = "~/.pi/agent/herd";
 const DEFAULT_HERD_PATH = join(homedir(), ".pi", "agent", "herd.json");
 const DEFAULT_MAX_MODEL_CONCURRENT = 2;
 const DEFAULT_TIMEOUT_MS = 600_000;
+const DEFAULT_LOCAL_MODEL = "vllm/Qwen/Qwen3.6-27B-FP8";
+
+const DO_ALIASES = new Set(["do"]);
+const THINK_ALIASES = new Set([
+  "think",
+  "review",
+  "plan",
+  "architect",
+  "verify",
+]);
 
 /** Competing herdr extensions — refuse to load if found in Pi settings. */
 export const COMPETING_PACKAGE_NAMES = [
@@ -40,10 +49,6 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function isDifficulty(value: string): value is Difficulty {
-  return value === "easy" || value === "medium" || value === "hard";
-}
-
 function isIsolation(value: unknown): value is IsolationMode {
   return value === "none" || value === "worktree";
 }
@@ -65,29 +70,12 @@ function normalizeEntry(raw: unknown, index: number, bucket: string): CatalogEnt
   return entry;
 }
 
-function normalizeBucket(raw: unknown, bucket: Difficulty): CatalogEntry[] {
+function normalizeBucket(raw: unknown, bucket: string): CatalogEntry[] {
   if (raw == null) return [];
   if (!Array.isArray(raw)) {
     throw new Error(`herd.json "${bucket}" must be an array`);
   }
   return raw.map((item, i) => normalizeEntry(item, i, bucket));
-}
-
-function normalizePreferOn(raw: unknown): Difficulty[] {
-  if (!Array.isArray(raw)) return ["easy", "medium"];
-  const out: Difficulty[] = [];
-  for (const item of raw) {
-    if (typeof item !== "string") continue;
-    const d = item.trim().toLowerCase();
-    if (isDifficulty(d) && !out.includes(d)) out.push(d);
-  }
-  return out.length ? out : ["easy", "medium"];
-}
-
-function normalizeWhenFull(raw: unknown): LocalWhenFull {
-  // Default queue: burn free private local serially; set "overflow" for paid parallel.
-  if (raw === "overflow") return "overflow";
-  return "queue";
 }
 
 function normalizeResultDelivery(raw: unknown): ResultDelivery {
@@ -100,23 +88,16 @@ function normalizeLocal(raw: unknown): LocalConfig {
   const model =
     typeof obj.model === "string" && obj.model.trim()
       ? obj.model.trim()
-      : "vllm/Qwen/Qwen3.6-27B-FP8";
+      : DEFAULT_LOCAL_MODEL;
   const thinking =
     typeof obj.thinking === "string" && obj.thinking.trim()
       ? obj.thinking.trim()
       : "medium";
-  let maxStreams = 1;
-  if (typeof obj.maxStreams === "number" && obj.maxStreams >= 1) {
-    maxStreams = Math.floor(obj.maxStreams);
-  }
   return {
     enabled: obj.enabled !== false,
     model,
     thinking,
-    maxStreams,
     preflight: obj.preflight !== false,
-    preferOn: normalizePreferOn(obj.preferOn),
-    whenFull: normalizeWhenFull(obj.whenFull),
   };
 }
 
@@ -132,32 +113,54 @@ function normalizeDefaults(raw: unknown): HerdDefaults {
     waitForReply: obj.waitForReply === true,
     requireOutput: obj.requireOutput !== false,
     resultDelivery: normalizeResultDelivery(obj.resultDelivery),
-    // Last-job batch in index triggers one parent turn when true (default).
     triggerTurnOnResult: obj.triggerTurnOnResult !== false,
   };
 }
 
-/** Ensure local-tagged entry is first in a bucket (preferOn routing). */
-function promoteLocalInBucket(
-  bucket: CatalogEntry[],
-  local: LocalConfig,
+/** Old easy/medium/hard catalogs → think rank (hard, then remote medium, then remote easy). */
+function foldThink(
+  obj: Record<string, unknown>,
+  localModel: string,
 ): CatalogEntry[] {
-  const localEntry: CatalogEntry = {
-    model: local.model,
-    thinking: local.thinking,
-    local: true,
-  };
-  const withoutDup = bucket.filter(
-    (e) => !(e.local === true && e.model === local.model),
-  );
-  const idx = withoutDup.findIndex(
-    (e) => e.local === true || e.model === local.model,
-  );
-  if (idx >= 0) {
-    const promoted = { ...withoutDup[idx]!, local: true as const };
-    return [promoted, ...withoutDup.filter((_, i) => i !== idx)];
+  if (obj.think != null) return normalizeBucket(obj.think, "think");
+  const seen = new Set<string>();
+  const out: CatalogEntry[] = [];
+  for (const name of ["hard", "medium", "easy"] as const) {
+    for (const e of normalizeBucket(obj[name], name)) {
+      if (e.local === true || e.model === localModel) continue;
+      if (seen.has(e.model)) continue;
+      seen.add(e.model);
+      out.push({ model: e.model, thinking: e.thinking });
+    }
   }
-  return [localEntry, ...withoutDup];
+  return out;
+}
+
+/**
+ * Resolve spawn role. Default do (local).
+ * One-release shim: difficulty=easy|medium → do, hard → think.
+ */
+export function resolveRole(opts: {
+  role?: string;
+  difficulty?: string;
+}): { role: Role; shim?: string } {
+  const roleRaw = opts.role?.trim().toLowerCase();
+  if (roleRaw) {
+    if (DO_ALIASES.has(roleRaw)) return { role: "do" };
+    if (THINK_ALIASES.has(roleRaw)) return { role: "think" };
+    throw new Error(
+      `role must be do|think (aliases: review, plan, architect, verify); got '${opts.role}'`,
+    );
+  }
+  const d = opts.difficulty?.trim().toLowerCase();
+  if (!d) return { role: "do" };
+  if (d === "easy" || d === "medium") {
+    return { role: "do", shim: `difficulty=${d} → do` };
+  }
+  if (d === "hard") return { role: "think", shim: "difficulty=hard → think" };
+  throw new Error(
+    `difficulty shim accepts easy|medium|hard (got '${opts.difficulty}'). Prefer role=do|think.`,
+  );
 }
 
 /** Parse a herd.json object into a validated HerdConfig. */
@@ -181,23 +184,11 @@ export function parseHerdConfig(raw: unknown): HerdConfig {
   }
 
   const local = normalizeLocal(obj.local);
-  let easy = normalizeBucket(obj.easy, "easy");
-  let medium = normalizeBucket(obj.medium, "medium");
-  let hard = normalizeBucket(obj.hard, "hard");
+  const think = foldThink(obj, local.model);
 
-  // Prefer local first on configured difficulties (default easy+medium).
-  // hard stays frontier-only unless preferOn explicitly includes it.
-  if (local.enabled) {
-    if (local.preferOn.includes("easy")) easy = promoteLocalInBucket(easy, local);
-    if (local.preferOn.includes("medium")) {
-      medium = promoteLocalInBucket(medium, local);
-    }
-    if (local.preferOn.includes("hard")) hard = promoteLocalInBucket(hard, local);
-  }
-
-  if (easy.length === 0 && medium.length === 0 && hard.length === 0) {
+  if (!local.enabled && think.length === 0) {
     throw new Error(
-      "herd.json must define at least one model in easy, medium, or hard",
+      "herd.json must enable local or define at least one think model",
     );
   }
 
@@ -206,23 +197,9 @@ export function parseHerdConfig(raw: unknown): HerdConfig {
     sessionPolicy: "per-job",
     maxModelConcurrent,
     local,
-    easy,
-    medium,
-    hard,
+    think,
     defaults: normalizeDefaults(obj.defaults),
   };
-}
-
-export function bucketFor(config: HerdConfig, difficulty: Difficulty): CatalogEntry[] {
-  return config[difficulty];
-}
-
-export function assertDifficulty(value: string): Difficulty {
-  const v = value.trim().toLowerCase();
-  if (!isDifficulty(v)) {
-    throw new Error(`difficulty must be easy|medium|hard (got '${value}')`);
-  }
-  return v;
 }
 
 export function loadHerdConfig(path = defaultHerdPath()): HerdConfig {
@@ -256,38 +233,17 @@ export function defaultConfigObject(): Record<string, unknown> {
     maxModelConcurrent: DEFAULT_MAX_MODEL_CONCURRENT,
     local: {
       enabled: true,
-      model: "vllm/Qwen/Qwen3.6-27B-FP8",
+      model: DEFAULT_LOCAL_MODEL,
       thinking: "medium",
-      maxStreams: 1,
       preflight: true,
-      preferOn: ["easy", "medium"],
-      // queue = burn free local GPU serially; overflow = paid remote when local busy
-      whenFull: "queue",
     },
-    easy: [
+    think: [
       {
-        model: "vllm/Qwen/Qwen3.6-27B-FP8",
-        thinking: "medium",
-        local: true,
-      },
-      {
-        model: "claude-code/claude-sonnet-5",
-        thinking: "medium",
-      },
-    ],
-    medium: [
-      {
-        model: "grok-cli/grok-build",
-        thinking: "medium",
-      },
-    ],
-    hard: [
-      {
-        model: "grok-cli/grok-4.5",
+        model: "grok-cli/grok-4.6",
         thinking: "high",
       },
       {
-        model: "claude-code/claude-opus-4-8",
+        model: "openai-codex/gpt-5.6-sol",
         thinking: "high",
       },
     ],

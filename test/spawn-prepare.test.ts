@@ -16,6 +16,7 @@ import {
   getHerdSlashCompletions,
 } from "../src/herd/slash.ts";
 import { spawnJob } from "../src/herd/spawn.ts";
+import { buildHandoffKick } from "../src/handoff.ts";
 import { parseHerdConfig, defaultConfigObject } from "../src/config.ts";
 import { createLocalStreamLock } from "../src/local-lock.ts";
 import { createHerdState } from "../src/state.ts";
@@ -124,6 +125,13 @@ describe("spawn lifecycle", () => {
     const monitor = {
       inFlightLaneClaims: () => [],
       reserveSlot: async () => "slot-1",
+      modelInUse: () => 0,
+      thinkLoad: () => 0,
+      claimThinkPick: (catalog: { model: string; thinking: string }[]) => ({
+        entry: catalog[0]!,
+        queued: false,
+      }),
+      releaseThinkHold: () => {},
       attachAndWatch: (opts: Record<string, unknown>) => {
         watched = opts;
         return {};
@@ -135,7 +143,7 @@ describe("spawn lifecycle", () => {
 
     await spawnJob({
       config,
-      params: { task: "review", difficulty: "easy", output: "review.md" },
+      params: { task: "review", output: "review.md" },
       state: createHerdState(),
       localLock,
       herdr,
@@ -149,13 +157,36 @@ describe("spawn lifecycle", () => {
   });
 });
 
+describe("handoff kick", () => {
+  it("banners local vs think", () => {
+    const local = buildHandoffKick({
+      task: "edit foo.ts",
+      runDir: "/run",
+      reads: [],
+      output: "out.md",
+      local: true,
+      role: "do",
+    });
+    assert.match(local, /LOCAL worker/);
+    const think = buildHandoffKick({
+      task: "review",
+      runDir: "/run",
+      reads: [],
+      output: "rev.md",
+      local: false,
+      role: "think",
+    });
+    assert.match(think, /THINK pass/);
+  });
+});
+
 describe("slash parse", () => {
   it("parses spawn kv", () => {
     const p = parseHerdSlashArgs(
-      `spawn difficulty=easy output=context.md task="Do the thing"`,
+      `spawn role=think output=context.md task="Do the thing"`,
     );
     assert.equal(p.action, "spawn");
-    assert.equal(p.difficulty, "easy");
+    assert.equal(p.role, "think");
     assert.equal(p.output, "context.md");
     assert.equal(p.task, "Do the thing");
   });

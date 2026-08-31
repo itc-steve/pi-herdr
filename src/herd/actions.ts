@@ -26,6 +26,7 @@ import { countSessionEntries } from "../readback.ts";
 export type HerdActionParams = {
   action: string;
   task?: string;
+  role?: string;
   difficulty?: string;
   model?: string;
   thinking?: string;
@@ -267,7 +268,7 @@ export async function executeHerd(
       model: job.model,
       thinking: job.thinking,
       local: job.local,
-      difficulty: job.difficulty,
+      role: job.role,
     };
     const collected = await collectReply({ herdr, handle, signal });
     return {

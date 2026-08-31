@@ -1,115 +1,33 @@
-import type { Difficulty, HerdConfig, ResolvedModel } from "./types.ts";
-import { assertDifficulty, bucketFor } from "./config.ts";
+import type { CatalogEntry, HerdConfig, ResolvedModel, Role } from "./types.ts";
+import { resolveRole } from "./config.ts";
 import type { LocalStreamLock } from "./local-lock.ts";
 
 export type ResolveModelOpts = {
-  difficulty: string;
-  /** Exact provider/model id — always allowed; still requires difficulty. */
+  role?: string;
+  /** One-release shim for easy|medium|hard. */
+  difficulty?: string;
+  /** Exact provider/model id — always allowed. */
   model?: string;
   thinking?: string;
   /** How many local streams are currently held. */
   localInUse?: number;
+  /** In-flight count per exact model string (think ranking). */
+  modelInUse?: (model: string) => number;
+  maxModelConcurrent?: number;
+  /** Atomic least-loaded think pick (parallel spawns). */
+  claimThinkPick?: (
+    catalog: CatalogEntry[],
+    max: number,
+    jobId: string,
+  ) => { entry: CatalogEntry; queued: boolean };
 };
 
-/**
- * Resolve which model/thinking to boot for a spawn.
- *
- * Rules:
- * - difficulty required
- * - model= always allowed (override)
- * - walk bucket; skip local entries when streams exhausted
- * - local busy + whenFull=overflow → next non-local in same bucket
- * - local is promoted into preferOn difficulties by parseHerdConfig
- *
- * NOTE: localInUse is a snapshot. Parallel spawns must call
- * {@link resolveModelClaimingLocal} so only maxStreams jobs actually take the GPU.
- */
-export function resolveModel(
-  config: HerdConfig,
-  opts: ResolveModelOpts,
-): ResolvedModel {
-  const difficulty = assertDifficulty(opts.difficulty);
-  const localInUse = opts.localInUse ?? 0;
-  const maxStreams = config.local.maxStreams;
-
-  if (opts.model?.trim()) {
-    const model = opts.model.trim();
-    const fromBucket = findInBuckets(config, model);
-    const local =
-      fromBucket?.local === true ||
-      (config.local.enabled && model === config.local.model);
-    const thinking =
-      opts.thinking?.trim() ||
-      fromBucket?.thinking ||
-      (local ? config.local.thinking : "medium");
-
-    if (local && localInUse >= maxStreams) {
-      throw new Error(
-        `Local model '${model}' requested but local streams full ` +
-          `(${localInUse}/${maxStreams}). Pick a non-local model, wait, or omit model= ` +
-          `so difficulty=${difficulty} can fall through the bucket.`,
-      );
-    }
-
-    return {
-      model,
-      thinking,
-      local,
-      difficulty,
-      reason: local
-        ? `exact model= (local) with difficulty=${difficulty}`
-        : `exact model= with difficulty=${difficulty}`,
-    };
-  }
-
-  const bucket = bucketFor(config, difficulty);
-  if (bucket.length === 0) {
-    throw new Error(
-      `No models configured for difficulty=${difficulty}. Edit ~/.pi/agent/herd.json.`,
-    );
-  }
-
-  for (const entry of bucket) {
-    const isLocal =
-      entry.local === true ||
-      (config.local.enabled && entry.model === config.local.model);
-    if (isLocal) {
-      if (!config.local.enabled) continue;
-      if (localInUse >= maxStreams) continue;
-      return {
-        model: entry.model,
-        thinking: opts.thinking?.trim() || entry.thinking,
-        local: true,
-        difficulty,
-        reason: `difficulty=${difficulty} preferred local (streams ${localInUse}/${maxStreams})`,
-      };
-    }
-    return {
-      model: entry.model,
-      thinking: opts.thinking?.trim() || entry.thinking,
-      local: false,
-      difficulty,
-      reason:
-        localInUse >= maxStreams
-          ? `difficulty=${difficulty}; local busy → next catalog model`
-          : `difficulty=${difficulty} bucket order`,
-    };
-  }
-
-  throw new Error(
-    `No available model for difficulty=${difficulty} ` +
-      `(local streams ${localInUse}/${maxStreams}).`,
-  );
-}
-
 function isLocalModel(config: HerdConfig, model: string): boolean {
-  if (config.local.enabled && model === config.local.model) return true;
-  return findInBuckets(config, model)?.local === true;
+  return config.local.enabled && model === config.local.model;
 }
 
 function localResolved(
   config: HerdConfig,
-  difficulty: Difficulty,
   thinking: string | undefined,
   reason: string,
 ): ResolvedModel {
@@ -117,34 +35,160 @@ function localResolved(
     model: config.local.model,
     thinking: thinking?.trim() || config.local.thinking,
     local: true,
-    difficulty,
+    role: "do",
     reason,
   };
 }
 
+/** One in-flight job per think model — don't double a cloud subscription. */
+export const THINK_PER_MODEL = 1;
+
+/**
+ * Rotate through think[] from startIndex. Skip models at `max` (default 1).
+ * All full → queue the startIndex entry. nextStart advances on a real pick
+ * so a later think (second opinion) gets the other model even if the first is idle.
+ */
+export function pickThinkEntry(
+  catalog: CatalogEntry[],
+  load: (model: string) => number,
+  max = THINK_PER_MODEL,
+  startIndex = 0,
+): { entry: CatalogEntry; queued: boolean; nextStart: number } {
+  if (catalog.length === 0) {
+    throw new Error(
+      "No think models configured. Add think[] in ~/.pi/agent/herd.json.",
+    );
+  }
+  const n = catalog.length;
+  const origin = ((startIndex % n) + n) % n;
+  for (let i = 0; i < n; i++) {
+    const idx = (origin + i) % n;
+    const e = catalog[idx]!;
+    if (load(e.model) < max) {
+      return { entry: e, queued: false, nextStart: (idx + 1) % n };
+    }
+  }
+  return { entry: catalog[origin]!, queued: true, nextStart: origin };
+}
+
+function thinkResolved(
+  entry: CatalogEntry,
+  thinking: string | undefined,
+  queued: boolean,
+  extraReason?: string,
+): ResolvedModel {
+  const reason = queued
+    ? `think catalog full → queue ${entry.model}`
+    : `think ${entry.model}`;
+  return {
+    model: entry.model,
+    thinking: thinking?.trim() || entry.thinking,
+    local: false,
+    role: "think",
+    reason: extraReason ? `${extraReason}; ${reason}` : reason,
+  };
+}
+
+function pickThink(
+  config: HerdConfig,
+  thinking: string | undefined,
+  modelInUse: ((model: string) => number) | undefined,
+  max: number,
+  extraReason?: string,
+): ResolvedModel {
+  const picked = pickThinkEntry(
+    config.think,
+    modelInUse ?? (() => 0),
+    THINK_PER_MODEL,
+  );
+  return thinkResolved(picked.entry, thinking, picked.queued, extraReason);
+}
+
+/**
+ * Snapshot resolve (no lock). Local-full + exact local model throws.
+ * Parallel spawns must call {@link resolveModelClaimingLocal}.
+ */
+export function resolveModel(
+  config: HerdConfig,
+  opts: ResolveModelOpts,
+): ResolvedModel {
+  const { role, shim } = resolveRole({
+    role: opts.role,
+    difficulty: opts.difficulty,
+  });
+  const localInUse = opts.localInUse ?? 0;
+  const max = opts.maxModelConcurrent ?? config.maxModelConcurrent;
+  const shimNote = shim ? `${shim}; ` : "";
+
+  if (opts.model?.trim()) {
+    const model = opts.model.trim();
+    const local = isLocalModel(config, model);
+    const fromThink = config.think.find((e) => e.model === model);
+    const thinking =
+      opts.thinking?.trim() ||
+      (local ? config.local.thinking : fromThink?.thinking) ||
+      "medium";
+    if (local && localInUse >= max) {
+      throw new Error(
+        `Local model '${model}' requested but local streams full ` +
+          `(${localInUse}/${max}). Wait, or omit model= for role=think.`,
+      );
+    }
+    return {
+      model,
+      thinking,
+      local,
+      role: local ? "do" : role,
+      reason: local
+        ? `${shimNote}exact model= (local)`
+        : `${shimNote}exact model=`,
+    };
+  }
+
+  if (role === "do") {
+    if (!config.local.enabled) {
+      throw new Error(
+        "Local is disabled. Pass role=think or enable local in ~/.pi/agent/herd.json.",
+      );
+    }
+    if (localInUse >= max) {
+      throw new Error(
+        `Local streams full (${localInUse}/${max}). Spawn queues a seat; ` +
+          `do not overflow onto think.`,
+      );
+    }
+    return localResolved(
+      config,
+      opts.thinking,
+      `${shimNote}role=do local (streams ${localInUse}/${max})`,
+    );
+  }
+
+  return pickThink(config, opts.thinking, opts.modelInUse, max, shim);
+}
+
 async function claimLocalSeat(
   config: HerdConfig,
-  difficulty: Difficulty,
   jobId: string,
   thinking: string | undefined,
   localLock: LocalStreamLock,
   signal: AbortSignal | undefined,
   reason: string,
 ): Promise<{ resolved: ResolvedModel; localHeld: boolean }> {
+  if (!config.local.enabled) {
+    throw new Error(
+      "Local is disabled. Pass role=think or enable local in ~/.pi/agent/herd.json.",
+    );
+  }
   if (localLock.tryAcquire(jobId)) {
     return {
-      resolved: localResolved(config, difficulty, thinking, reason),
+      resolved: localResolved(config, thinking, reason),
       localHeld: true,
     };
   }
   await localLock.acquire(jobId, signal);
   return {
-    resolved: localResolved(
-      config,
-      difficulty,
-      thinking,
-      `difficulty=${difficulty} preferred local (queued seat)`,
-    ),
+    resolved: localResolved(config, thinking, `${reason} (queued seat)`),
     localHeld: true,
   };
 }
@@ -152,14 +196,8 @@ async function claimLocalSeat(
 /**
  * Resolve a model and atomically claim a local stream when needed.
  *
- * Order matters for whenFull=queue: we must claim/wait the local seat
- * *before* resolveModel walks past local because streams look full.
- *
- * 1. model= non-local → resolve, no seat
- * 2. model= local → claim or queue for seat
- * 3. preferOn difficulty + local enabled → claim local if free;
- *    whenFull=queue → wait; whenFull=overflow → remote catalog
- * 4. else → normal bucket resolve (local only if free in snapshot)
+ * do → always local, queue if full (never overflow onto think).
+ * think → one per catalog model; rotate so a second think is the other model.
  */
 export async function resolveModelClaimingLocal(
   config: HerdConfig,
@@ -167,122 +205,67 @@ export async function resolveModelClaimingLocal(
   localLock: LocalStreamLock,
   signal?: AbortSignal,
 ): Promise<{ resolved: ResolvedModel; localHeld: boolean }> {
-  const difficulty = assertDifficulty(opts.difficulty);
+  const { role, shim } = resolveRole({
+    role: opts.role,
+    difficulty: opts.difficulty,
+  });
+  const shimNote = shim ? `${shim}; ` : "";
   const modelForced = opts.model?.trim();
+  const max = opts.maxModelConcurrent ?? config.maxModelConcurrent;
 
   if (modelForced) {
     if (isLocalModel(config, modelForced)) {
       return claimLocalSeat(
         config,
-        difficulty,
         opts.jobId,
         opts.thinking,
         localLock,
         signal,
-        `exact model= (local) with difficulty=${difficulty}`,
+        `${shimNote}exact model= (local)`,
       );
     }
     const resolved = resolveModel(config, {
-      difficulty,
+      role,
+      difficulty: opts.difficulty,
       model: modelForced,
       thinking: opts.thinking,
       localInUse: localLock.inUse(),
+      modelInUse: opts.modelInUse,
+      maxModelConcurrent: max,
     });
     return { resolved, localHeld: false };
   }
 
-  const preferLocal =
-    config.local.enabled && config.local.preferOn.includes(difficulty);
-
-  if (preferLocal) {
-    if (localLock.tryAcquire(opts.jobId)) {
-      return {
-        resolved: localResolved(
-          config,
-          difficulty,
-          opts.thinking,
-          `difficulty=${difficulty} preferred local (streams ${localLock.inUse() - 1}/${localLock.maxStreamsCount()})`,
-        ),
-        localHeld: true,
-      };
-    }
-
-    if (config.local.whenFull === "queue") {
-      await localLock.acquire(opts.jobId, signal);
-      return {
-        resolved: localResolved(
-          config,
-          difficulty,
-          opts.thinking,
-          `difficulty=${difficulty} preferred local (queued seat)`,
-        ),
-        localHeld: true,
-      };
-    }
-
-    // overflow: remote catalog with local treated as full
-    const resolved = resolveModel(config, {
-      difficulty,
-      thinking: opts.thinking,
-      localInUse: localLock.maxStreamsCount(),
-    });
-    if (resolved.local) {
-      throw new Error(
-        `Local streams full (${localLock.inUse()}/${localLock.maxStreamsCount()}) ` +
-          `and no non-local model for difficulty=${difficulty}. ` +
-          `Add a remote model in ~/.pi/agent/herd.json, set local.whenFull=queue, or wait.`,
+  if (role === "think") {
+    if (opts.claimThinkPick) {
+      const picked = opts.claimThinkPick(
+        config.think,
+        THINK_PER_MODEL,
+        opts.jobId,
       );
+      return {
+        resolved: thinkResolved(picked.entry, opts.thinking, picked.queued, shim),
+        localHeld: false,
+      };
     }
-    return { resolved, localHeld: false };
-  }
-
-  // Difficulty not in preferOn — normal bucket walk (may still hit a local tag).
-  let resolved = resolveModel(config, {
-    difficulty,
-    thinking: opts.thinking,
-    localInUse: localLock.inUse(),
-  });
-  if (!resolved.local) {
-    return { resolved, localHeld: false };
-  }
-  if (localLock.tryAcquire(opts.jobId)) {
-    return { resolved, localHeld: true };
-  }
-  if (config.local.whenFull === "queue") {
-    await localLock.acquire(opts.jobId, signal);
-    return {
-      resolved: localResolved(
-        config,
-        difficulty,
-        opts.thinking,
-        `difficulty=${difficulty} preferred local (queued seat)`,
-      ),
-      localHeld: true,
-    };
-  }
-  resolved = resolveModel(config, {
-    difficulty,
-    thinking: opts.thinking,
-    localInUse: localLock.maxStreamsCount(),
-  });
-  if (resolved.local) {
-    throw new Error(
-      `Local streams full (${localLock.inUse()}/${localLock.maxStreamsCount()}) ` +
-        `and no non-local model for difficulty=${difficulty}.`,
+    const resolved = pickThink(
+      config,
+      opts.thinking,
+      opts.modelInUse,
+      max,
+      shim,
     );
+    return { resolved, localHeld: false };
   }
-  return { resolved, localHeld: false };
-}
 
-function findInBuckets(
-  config: HerdConfig,
-  model: string,
-): { model: string; thinking: string; local?: boolean } | undefined {
-  for (const d of ["easy", "medium", "hard"] as Difficulty[]) {
-    const hit = config[d].find((e) => e.model === model);
-    if (hit) return hit;
-  }
-  return undefined;
+  return claimLocalSeat(
+    config,
+    opts.jobId,
+    opts.thinking,
+    localLock,
+    signal,
+    `${shimNote}role=do local`,
+  );
 }
 
 export function formatModelsList(
@@ -294,28 +277,23 @@ export function formatModelsList(
     "herd models",
     `local: ${config.local.enabled ? "enabled" : "disabled"} ` +
       `${config.local.model}:${config.local.thinking} ` +
-      `streams ${localInUse}/${config.local.maxStreams}` +
+      `seats ${localInUse}/${config.maxModelConcurrent}` +
       (localQueued ? ` queued ${localQueued}` : "") +
-      ` whenFull=${config.local.whenFull} ` +
-      `preferOn=${config.local.preferOn.join(",") || "(none)"}`,
-    `maxModelConcurrent: ${config.maxModelConcurrent} (per provider/model)`,
+      " [local]",
+    `maxModelConcurrent: ${config.maxModelConcurrent} (local seats + per provider/model)`,
     `resultDelivery: ${config.defaults.resultDelivery} ` +
       `triggerTurnOnResult: ${config.defaults.triggerTurnOnResult}`,
+    "",
+    "think (1 at a time per model; next think rotates):",
   ];
-  for (const d of ["easy", "medium", "hard"] as Difficulty[]) {
-    // Blank line before each bucket so markdown UIs don't nest medium/hard
-    // under the last easy list item.
-    lines.push("", `${d}:`);
-    const bucket = config[d];
-    if (!bucket.length) {
-      lines.push("  (empty)");
-      continue;
-    }
-    for (const e of bucket) {
-      const tag = e.local ? " [local]" : "";
-      // Avoid leading-space "-" (markdown nested lists). Use plain indent.
-      lines.push(`  ${e.model}:${e.thinking}${tag}`);
+  if (!config.think.length) {
+    lines.push("  (empty)");
+  } else {
+    for (const e of config.think) {
+      lines.push(`  ${e.model}:${e.thinking}`);
     }
   }
   return lines.join("\n");
 }
+
+export type { Role };

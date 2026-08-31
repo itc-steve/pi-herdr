@@ -1,17 +1,14 @@
 # pi-herdr
 
-**Pi extension for Herdr-visible subagent herds - local-first preference, single-stream local seat, and difficulty-based model routing.**
-
-Markdown handoff runs, exclusive write lanes, and a structured `herdr` tool for terminal control.
-
-![Herdr workspace with a multi-agent herd: leader pane orchestrating completed workers while a hard review job spawns](./Screenshots/Screenshot01.jpg)
+**Pi extension for Herdr-visible subagent herds — default-local workers, optional ranked-frontier think, markdown handoff.**
 
 **Design intent**
 
 | Role | Who |
 | ---- | --- |
-| Orchestration / multi-task / review | Frontier model (parent session) |
-| Single discrete tasks | **Local seat** - private, free, `maxStreams: 1`, clean per-job context |
+| Orchestration | Frontier model (parent session) |
+| Implement / slice | **Local seat** — private, free, clean per-job context, cap = `maxModelConcurrent` |
+| Isolated review / plan / VERIFY | `role=think` — one job per catalog model; two tasks → one each; next think rotates to the other |
 | User view / permissions | [Herdr](https://herdr.dev) panes (watch, focus, accept) |
 
 Requires running **inside [Herdr](https://herdr.dev)** (`HERDR_ENV=1`). Outside Herdr, `herd` still loads for config/status, but spawn/boot and the `herdr` tool are inactive.
@@ -36,7 +33,7 @@ Then `/reload`. Use `/herd help` for slash usage.
 
 - [Pi coding agent](https://github.com/earendil-works/pi)
 - [Herdr](https://herdr.dev) (terminal workspace / agent multiplexer)
-- Models listed in config must already be available to Pi (local vLLM, Claude Code, Grok CLI, etc.)
+- Models listed in config must already be available to Pi (local vLLM/SGLang, Grok CLI, etc.)
 
 ## Config
 
@@ -50,21 +47,10 @@ Copy [herd.json.example](./herd.json.example) to `~/.pi/agent/herd.json` (create
     "enabled": true,
     "model": "vllm/Qwen/Qwen3.6-27B-FP8",
     "thinking": "medium",
-    "maxStreams": 1,
-    "preflight": true,
-    "preferOn": ["easy", "medium"],
-    "whenFull": "queue"
+    "preflight": true
   },
-  "easy": [
-    { "model": "vllm/Qwen/Qwen3.6-27B-FP8", "thinking": "medium", "local": true },
-    { "model": "openai-codex/gpt-5.6-luna", "thinking": "medium" }
-  ],
-  "medium": [
-    { "model": "grok-cli/grok-4.5", "thinking": "medium" },
-    { "model": "openai-codex/gpt-5.6-terra", "thinking": "medium" }
-  ],
-  "hard": [
-    { "model": "claude-code/claude-opus-5", "thinking": "high" },
+  "think": [
+    { "model": "grok-cli/grok-4.6", "thinking": "high" },
     { "model": "openai-codex/gpt-5.6-sol", "thinking": "high" }
   ],
   "defaults": {
@@ -78,55 +64,45 @@ Copy [herd.json.example](./herd.json.example) to `~/.pi/agent/herd.json` (create
 }
 ```
 
-Edit model ids to match your Pi providers.
+`think[]` order **is** the rank. Put the best frontier first.
+
+Old `easy` / `medium` / `hard` catalogs still parse: remotes fold into `think` (hard, then medium, then easy). `local.maxStreams`, `preferOn`, and `whenFull` are ignored. Cap is always `maxModelConcurrent`.
 
 ### Field reference
 
 | Field | Meaning |
 | ----- | ------- |
 | `sessionDir` | Run root (`runs/`, journals, session JSONL) |
-| `maxModelConcurrent` | Cap on in-flight monitored jobs **per exact provider/model** |
-| `local` | Single-stream seat: model id, `maxStreams` (default 1), optional preflight |
-| `local.preferOn` | Difficulties that try local first when free (default `easy`+`medium`) |
-| `local.whenFull` | `queue` = wait for free local seat (default); `overflow` = next catalog model |
-| `easy` / `medium` / `hard` | Ordered model catalogs; first free match wins |
-| `defaults.isolation` | `none` (shared tree + `owns=`) or `worktree` |
+| `maxModelConcurrent` | Cap on **local seats** and on in-flight jobs **per exact provider/model** |
+| `local` | Default implementer: model id, thinking, optional preflight |
+| `think` | Ordered frontier catalog for `role=think` |
+| `defaults.isolation` | ignored; writers share the tree (`owns=` is the isolation) |
 | `defaults.requireOutput` | Async spawn must declare `output=` |
 | `defaults.resultDelivery` | `pointer` (default: path only) or `full` (paste reply) |
 | `defaults.triggerTurnOnResult` | One parent turn when the last in-flight job finishes (default true) |
 
-The `local` block is a **concurrency policy** (one stream, clean context) - usually a private GPU, but any model tagged `"local": true` can own the seat.
-
-### Escape hatches
-
-```json
-"local": { "whenFull": "overflow" }           // paid parallel when local busy
-"local": { "preferOn": ["easy"] }             // medium stays remote-only
-"defaults": { "resultDelivery": "full" }      // embed full reply in herd-result
-"defaults": { "triggerTurnOnResult": false }  // display only; no auto parent turn
-```
+Jobs resolved to the local model are tagged `local: true` so parent, kick text, and `herd models` all see the seat.
 
 ## How it works
 
-### Difficulty routing (bottom-up)
+### Default-local + optional think
 
-| Difficulty | Use for | Routing |
-| ---------- | ------- | ------- |
-| **easy** | **Default** single discrete tasks | Local first when free (`preferOn`); then `whenFull` queue or overflow |
-| **medium** | Multi-file bulk with disjoint write lanes | Local first when free (default `preferOn`); else catalog |
-| **hard** | Architecture, critique, VERIFY - **not** the default implementer | Frontier catalog only (unless `preferOn` includes hard) |
+| Spawn | Route |
+| ----- | ----- |
+| no `role`, or `role=do` | Local. Queue if seats full. Never overflow onto think. |
+| `role=think` (aliases: `review`, `plan`, `architect`, `verify`) | One in-flight per think model. First → `think[0]`. Second task or second opinion → the other. Both busy → queue `think[0]` |
+| `model=` | That model (local id still takes a local seat) |
 
-**Never** dump a whole project on one `difficulty=hard` spawn. Decompose; promote only when needed. Local busy does **not** escalate difficulty - it queues or overflows inside the same bucket.
+**Never** dump a whole project on one spawn. Decompose. Parent stays on a frontier model for orchestration; workers get a fresh session and a narrow kick.
 
-Default single-file / summarize / scaffold work to **`difficulty=easy`**. Keep the parent on a frontier model for orchestration; herd workers do the narrow work with clean per-job sessions.
+One-release shim: `difficulty=easy\|medium` → do, `difficulty=hard` → think.
 
-### Local seat (private + free)
+### Local seat
 
-1. Free seat → local boots first on every difficulty in `preferOn`.
-2. `whenFull: "queue"` (default) → extra jobs **wait** for the local GPU (serial free compute; no cloud tokens).
-3. `whenFull: "overflow"` → extra jobs take the next catalog model (paid parallel).
-4. Each job gets a **fresh** `sessions/<job>.jsonl` so the local model never juggles multiple tasks in one context.
-5. Do not pass `model=` for the local model on more than `maxStreams` jobs.
+1. Default spawn claims a local seat (cap = `maxModelConcurrent`).
+2. Extra do jobs **wait** for a free seat.
+3. Each job gets a **fresh** `sessions/<job>.jsonl`.
+4. Kick banner: *You are a LOCAL worker. One slice…*
 
 ### Handoff runs
 
@@ -139,7 +115,7 @@ Default single-file / summarize / scaffold work to **`difficulty=easy`**. Keep t
   <your output=.md files>
 ```
 
-Shared context is **markdown only** - panes do not chat to each other. Each spawn opens a background tab in the parent's current workspace. Job tabs stay open after success so you can watch or intervene in Herdr.
+Shared context is **markdown only** — panes do not chat to each other. Each spawn opens a background tab in the parent's current workspace. Job tabs stay open after success so you can watch or intervene in Herdr.
 
 ### Write lanes
 
@@ -149,28 +125,28 @@ Multi-writer fan-out requires disjoint `owns=` (and optional `forbid=`). Put **P
 
 Async jobs are monitored in the background.
 
-- Mid-wave: footer only (`herd: N mon +local M`) - **no** parent turn.
+- Mid-wave: footer only (`herd: N mon +local M`) — **no** parent turn.
 - When the **last** in-flight job finishes: **one** batched `herd-result` with short **pointers** (`output=path`), not full reply pastes.
-- Parent should **read the artifact** if it needs content - do not reassess the whole task from a pointer.
+- Parent should **read the artifact** if it needs content — do not reassess the whole task from a pointer.
 - Use `herd wait` / `herd collect` for a sync barrier. Set `resultDelivery=full` only if you need reply bodies in-session.
 
 ## Tools
 
 | Tool | Role |
 | ---- | ---- |
-| `herd` | Assign / abort / steer / status difficulty-routed subagents |
+| `herd` | Assign / abort / steer / status local-first subagents |
 | `herdr` | View and control Herdr terminals (workspaces, tabs, panes, worktrees) |
 
-**Rule:** assign work with `herd`. Use `herdr` to view/focus/read - never `herdr run` into a herd job pane to assign work.
+**Rule:** assign work with `herd`. Use `herdr` to view/focus/read — never `herdr run` into a herd job pane to assign work.
 
 ### `herd` actions
 
 | Action | Purpose |
 | ------ | ------- |
-| `models` | Show catalog + local stream use / queue / delivery defaults |
+| `models` | Show local seats + ranked think catalog |
 | `status` | Active monitors / local seats |
 | `run` | `create` / `list` / `use` / `show` handoff folders |
-| `spawn` | Boot a pane, submit task (`difficulty=` required; async needs `output=`) |
+| `spawn` | Boot a pane, submit task (async needs `output=`; `role=think` optional) |
 | `steer` / `abort` | Nudge or stop a job |
 | `wait` / `collect` | Block until idle / harvest reply |
 | `close` / `reset` | Close panes / clear monitors |
@@ -180,15 +156,15 @@ Async jobs are monitored in the background.
 
 ```text
 herd run create name=demo goal="Summarize this repo"
-herd spawn difficulty=easy task="Fill context.md from the repo" output=context.md
-herd spawn difficulty=medium task="Implement src/client.ts" output=progress-core.md owns=src/client.ts
-herd spawn difficulty=hard task="Review progress-*.md; note gaps" output=progress-review.md
+herd spawn task="Fill context.md from the repo" output=context.md
+herd spawn task="Implement src/client.ts" output=progress-core.md owns=src/client.ts
+herd spawn role=think task="Review progress-*.md; note gaps" output=progress-review.md
 ```
 
-Exact model override still requires difficulty:
+Exact model override:
 
 ```text
-herd spawn difficulty=easy model=openai-codex/gpt-5.6-luna task="…" output=notes.md
+herd spawn model=grok-cli/grok-4.6 task="…" output=notes.md
 ```
 
 ### Slash
@@ -198,16 +174,17 @@ herd spawn difficulty=easy model=openai-codex/gpt-5.6-luna task="…" output=not
 /herd models
 /herd status
 /herd run create name=<slug> goal="…"
-/herd spawn difficulty=easy task="…" output=file.md
+/herd spawn task="…" output=file.md
+/herd spawn role=think task="…" output=review.md
 ```
 
 ### `herdr` (view / control)
 
-Registered only when `HERDR_ENV` and `HERDR_PANE_ID` are set (Herdr-managed pane). Actions include workspace/tab/pane lifecycle, `read` / `watch` / `wait_agent`, `run` / `send` / `stop`, worktrees, and notifications. Prefer friendly aliases or ids from `herdr list` - never invent pane ids.
+Registered only when `HERDR_ENV` and `HERDR_PANE_ID` are set (Herdr-managed pane). Actions include workspace/tab/pane lifecycle, `read` / `watch` / `wait_agent`, `run` / `send` / `stop`, worktrees, and notifications. Prefer friendly aliases or ids from `herdr list` — never invent pane ids.
 
 ## Skills
 
-Package skills (`herd`, `herdr`) teach the launcher the bottom-up / local-first mindset and the herd vs herdr split. They install with the package via the Pi `skills` manifest.
+Package skills (`herd`, `herdr`) teach the launcher default-local vs think and the herd vs herdr split. They install with the package via the Pi `skills` manifest.
 
 ## Footer status
 

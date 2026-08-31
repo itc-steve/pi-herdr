@@ -458,13 +458,13 @@ export function registerHerdrTool(pi: ExtensionAPI): void {
 		description:
 			"Full structured control of Herdr: workspaces, tabs, panes, agents, worktrees, and notifications. " +
 			"Discover and read terminals in any space (including outside the herd), create/split/move panes, run commands, wait on output or agent status, and close panes you own. " +
-			"For herd jobs use the herd tool (spawn by difficulty) — never herdr-run to assign herd work.",
+			"For herd jobs use the herd tool (spawn; default local) — never herdr-run to assign herd work.",
 		promptSnippet:
 			"Inspect and control Herdr terminals — workspaces, tabs, panes, agents, worktrees (jobs → herd tool)",
 		promptGuidelines: [
 			"Use `herdr` when the user mentions Herdr or asks to inspect/control terminals, panes, tabs, workspaces, or non-herd agents. Prefer the structured herdr tool over raw `herdr` bash for toolized actions.",
 			"To see terminals outside the current space or outside the herd: `herdr list` with scope=all (or workspace=<id|label>). Then `herdr read` / `herdr pane_get` with the pane id or unique label.",
-			"Herd jobs: use `herd` spawn with difficulty= (and output= for async). Do not herdr-run or pane_split to assign herd work — `herd spawn` boots panes.",
+			"Herd jobs: use `herd` spawn (output= for async; role=think for frontier). Do not herdr-run or pane_split to assign herd work — `herd spawn` boots panes.",
 			"Do not loop workspace_focus/tab_list to \"open\" every herd pane; only one workspace can be UI-focused at a time.",
 			"When starting a one-off agent or command, default to a sibling pane in the current tab and cwd. Create another tab, workspace, or cwd only when the user requests that topology.",
 			"Preserve the current UI focus by default. Set focus only when the user explicitly asks to switch context.",

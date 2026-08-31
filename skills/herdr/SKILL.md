@@ -5,7 +5,7 @@ description: "View and control Herdr terminals. Prefer the herdr tool. For subag
 
 # Herdr (viewing + general terminal control)
 
-1. **`herd` tool** — assign work to difficulty-routed subagents
+1. **`herd` tool** — assign work to local-first subagents (role=think for frontier)
 2. **`herdr` tool** — view/control terminals (including watching herd panes when the user asks)
 
 ## Environment gate

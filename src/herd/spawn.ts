@@ -3,7 +3,10 @@
  */
 
 import type { HerdConfig, ManagedJob } from "../types.ts";
-import { resolveModelClaimingLocal } from "../resolve-model.ts";
+import {
+  resolveModelClaimingLocal,
+  THINK_PER_MODEL,
+} from "../resolve-model.ts";
 import {
   assertLaneAvailable,
   assertMultiWriterOwns,
@@ -44,7 +47,8 @@ export class SpawnError extends Error {}
 
 export type SpawnParams = {
   task: string;
-  difficulty: string;
+  role?: string;
+  difficulty?: string;
   model?: string;
   thinking?: string;
   label?: string;
@@ -77,9 +81,6 @@ export async function spawnJob(opts: {
   const { config, params, state, localLock, herdr, monitor } = opts;
   const task = params.task?.trim();
   if (!task) throw new SpawnError("task is required");
-  if (!params.difficulty?.trim()) {
-    throw new SpawnError("difficulty=easy|medium|hard is required");
-  }
 
   const waitForReply = params.waitForReply === true;
   const requireOutput = config.defaults.requireOutput && !waitForReply;
@@ -102,21 +103,25 @@ export async function spawnJob(opts: {
   let ticketId = "";
 
   try {
-    // Job id first so the local-stream claim has a stable holder key before any
-    // async work. Parallel easy spawns all race the single local seat.
+    // Job id first so the local-seat claim has a stable holder key before any async work.
     const { runId, runDir } = requireActiveOrRef(config.sessionDir, params.run);
     jobId = nextJobId(runDir);
     const label = params.label?.trim() || jobId;
     const sessionFile = ensureJobSessionFile(runDir, jobId);
 
-    // Atomically resolve + claim local (queue or overflow per local.whenFull).
+    // Resolve role (default do) and claim a local seat when needed.
     const claimed = await resolveModelClaimingLocal(
       config,
       {
+        role: params.role,
         difficulty: params.difficulty,
         model: params.model,
         thinking: params.thinking,
         jobId,
+        modelInUse: (m) => opts.monitor.thinkLoad(m),
+        maxModelConcurrent: config.maxModelConcurrent,
+        claimThinkPick: (catalog, max, id) =>
+          opts.monitor.claimThinkPick(catalog, max, id),
       },
       localLock,
       opts.parentSignal,
@@ -160,8 +165,12 @@ export async function spawnJob(opts: {
       brief,
       thinking: resolved.thinking,
       local: resolved.local,
-      difficulty: resolved.difficulty,
+      role: resolved.role,
+      slotMax: config.think.some((e) => e.model === resolved.model)
+        ? THINK_PER_MODEL
+        : undefined,
     });
+    monitor.releaseThinkHold(jobId);
 
     const reads = parseReadsList(params.reads);
     const laneBlock =
@@ -174,6 +183,8 @@ export async function spawnJob(opts: {
       reads,
       output: outputRel,
       laneBlock,
+      role: resolved.role,
+      local: resolved.local,
     });
 
     const bootCmd = bootCommand(
@@ -223,7 +234,7 @@ export async function spawnJob(opts: {
       model: resolved.model,
       thinking: resolved.thinking,
       local: resolved.local,
-      difficulty: resolved.difficulty,
+      role: resolved.role,
     };
 
     const managed: ManagedJob = {
@@ -235,7 +246,7 @@ export async function spawnJob(opts: {
       model: resolved.model,
       thinking: resolved.thinking,
       local: resolved.local,
-      difficulty: resolved.difficulty,
+      role: resolved.role,
       runId,
       outputPath,
       owns: handle.owns,
@@ -267,7 +278,7 @@ export async function spawnJob(opts: {
           jobId,
           model: resolved.model,
           thinking: resolved.thinking,
-          difficulty: resolved.difficulty,
+          role: resolved.role,
           taskPreview: brief,
           reads,
           output: outputRel,
@@ -279,7 +290,7 @@ export async function spawnJob(opts: {
         monitor.releaseTicket(ticketId);
         return {
           text:
-            `Spawned ${jobId} [${resolved.difficulty}] ${resolved.model}:${resolved.thinking}` +
+            `Spawned ${jobId} [${resolved.role}] ${resolved.model}:${resolved.thinking}` +
             `${resolved.local ? " [local]" : ""}\n` +
             `pane ${paneId} workspace ${workspaceId}` +
             `${nudgedEnter ? " (Enter nudged)" : ""}\n\n` +
@@ -320,7 +331,7 @@ export async function spawnJob(opts: {
 
     return {
       text:
-        `Spawned ${jobId} [${resolved.difficulty}] ${resolved.model}:${resolved.thinking}` +
+        `Spawned ${jobId} [${resolved.role}] ${resolved.model}:${resolved.thinking}` +
         `${resolved.local ? " [local]" : ""} (async)\n` +
         `pane ${paneId} · workspace ${workspaceId} · label ${label}\n` +
         `reason: ${resolved.reason}` +
@@ -337,6 +348,7 @@ export async function spawnJob(opts: {
     };
   } catch (err) {
     if (ticketId) monitor.releaseTicket(ticketId);
+    if (jobId) monitor.releaseThinkHold(jobId);
     if (localHeld && jobId) localLock.release(jobId);
     if (jobId) state.activeMonitors.delete(jobId);
     throw err;

@@ -1,6 +1,6 @@
 import type { HerdActionParams } from "./actions.ts";
 
-export const HERD_SLASH_HELP = `herd — Pi subagent herd (bottom-up difficulty routing)
+export const HERD_SLASH_HELP = `herd — Pi subagent herd (default-local, optional think)
 
   /herd help
   /herd models
@@ -10,15 +10,14 @@ export const HERD_SLASH_HELP = `herd — Pi subagent herd (bottom-up difficulty 
   /herd run use <id>
   /herd run show <id>
   /herd journal
-  /herd spawn difficulty=easy|medium|hard task="…" output=file.md [model=…] [owns=…]
+  /herd spawn task="…" output=file.md [role=think] [model=…] [owns=…]
 
-Difficulty (scale bottom-up — never one hard job for a whole project):
-  easy   — narrow/cheap; local vLLM first, then remote easy overflow
-  medium — bulk build with disjoint owns=
-  hard   — review / think / VERIFY only (not default implementer)
+Roles:
+  (omit) / do — local implementer (default)
+  think       — ranked frontier catalog (review / plan / VERIFY)
 
 Rules:
-  - difficulty= is required on spawn
+  - role is optional; missing = local do
   - async spawn requires output=
   - multi-writer needs disjoint owns= (plan Parallel lanes first)
   - use herdr tool to view/focus panes — not to assign jobs
@@ -143,7 +142,7 @@ const BASE_SUBCOMMANDS: HerdSlashCompletion[] = items([
   { value: "status", description: "Active monitors / locks" },
   { value: "run", description: "Handoff folders create|list|use|show" },
   { value: "journal", description: "Completed jobs in active run" },
-  { value: "spawn", description: "difficulty= + task= + output=" },
+  { value: "spawn", description: "task= + output= [role=think]" },
   { value: "steer", description: "Nudge a running job" },
   { value: "abort", description: "Cancel job(s)" },
   { value: "wait", description: "Block until job idle" },
@@ -186,19 +185,14 @@ export function getHerdSlashCompletions(
   if (first === "spawn") {
     return items([
       {
-        value: 'difficulty=easy task="" output=',
-        label: "difficulty=easy …",
-        description: "Local-first when stream free",
+        value: 'task="" output=',
+        label: "spawn local do …",
+        description: "Default: local implementer",
       },
       {
-        value: 'difficulty=medium task="" output=',
-        label: "difficulty=medium …",
-        description: "Mid-tier catalog",
-      },
-      {
-        value: 'difficulty=hard task="" output=',
-        label: "difficulty=hard …",
-        description: "Strongest catalog",
+        value: 'role=think task="" output=',
+        label: "spawn think …",
+        description: "Ranked frontier review/plan/VERIFY",
       },
     ]);
   }

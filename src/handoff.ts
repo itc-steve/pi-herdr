@@ -74,8 +74,16 @@ export function buildHandoffKick(opts: {
   reads: string[];
   output?: string;
   laneBlock?: string;
+  role?: "do" | "think";
+  local?: boolean;
 }): string {
+  const banner = opts.local
+    ? "You are a LOCAL worker. One slice. Fresh session. Write output=. Do not plan the whole project."
+    : opts.role === "think"
+      ? "You are a cloud THINK pass (second opinion / plan / review). Read the run markdown. Do not take over implementation."
+      : "";
   const lines = [
+    ...(banner ? [banner, ""] : []),
     opts.task.trim(),
     "",
     "## Handoff",

@@ -1,6 +1,5 @@
 /**
- * Local vLLM stream slots — configurable maxStreams (default 1).
- * Separate from maxModelConcurrent (per exact provider/model API seats).
+ * Local GPU seats. Cap is maxModelConcurrent (same number as per-cloud-model seats).
  */
 
 export function createLocalStreamLock(maxStreams = 1) {
@@ -42,7 +41,7 @@ export function createLocalStreamLock(maxStreams = 1) {
     return true;
   }
 
-  /** Wait for a free local seat (whenFull=queue). */
+  /** Wait for a free local seat. */
   function acquire(jobId: string, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return Promise.reject(new Error("Aborted"));
     if (tryAcquire(jobId)) return Promise.resolve();

@@ -57,9 +57,9 @@ const ActionEnum = StringEnum(
   ] as const,
   {
     description:
-      "Herd action. Prefer many spawn calls with difficulty= + output=. " +
-      "Scale bottom-up: easy (local first) → medium (bulk build) → hard (review/think only). " +
-      "Never one hard job for a whole project. Herdr is view-only.",
+      "Herd action. Prefer many spawn calls with output=. Default is local do. " +
+      "Pass role=think only for isolated review/plan/VERIFY on the ranked frontier catalog. " +
+      "Never one think job for a whole project. Herdr is view-only.",
   },
 );
 
@@ -70,16 +70,21 @@ const RunActionEnum = StringEnum(["create", "list", "use", "show"] as const, {
 const HerdParams = Type.Object({
   action: ActionEnum,
   task: Type.Optional(Type.String({ description: "Short kick for spawn/steer" })),
+  role: Type.Optional(
+    Type.String({
+      description:
+        "Optional. Omit or do = local implementer. think (aliases: review, plan, architect, verify) = ranked frontier catalog.",
+    }),
+  ),
   difficulty: Type.Optional(
     Type.String({
       description:
-        "Required for spawn: easy|medium|hard. easy=local-first narrow work; " +
-        "medium=bulk implement; hard=review/think/VERIFY only — not default builder",
+        "Deprecated shim: easy|medium → do, hard → think. Prefer omitting role (local) or role=think.",
     }),
   ),
   model: Type.Optional(
     Type.String({
-      description: "Optional exact provider/model; still requires difficulty=",
+      description: "Optional exact provider/model escape hatch",
     }),
   ),
   thinking: Type.Optional(Type.String()),
@@ -104,12 +109,10 @@ const HerdParams = Type.Object({
 });
 
 const PROMPT_GUIDELINES = [
-  "Scale bottom-up with many herd spawn calls — never one hard job for a whole project.",
-  "DEFAULT single discrete tasks to difficulty=easy (local first). Local is free, private, maxStreams=1, clean per-job context — use it for every single-file / single-question / summary / scaffold job.",
-  "medium = multi-file bulk implementation. Local is still preferred when free (preferOn). whenFull=queue waits for the local seat serially instead of burning paid remote — do not escalate to hard because local is busy.",
-  "hard = frontier only: orchestration thinking, architecture, critique, VERIFY — not the default implementer. Parent/orchestrator stays on the frontier model.",
-  "Local seat is one stream: spawn many jobs; herd queues extras on local (whenFull=queue) or overflows (whenFull=overflow). Never force model=local on more than maxStreams jobs.",
-  "Async spawn requires difficulty= + output=. Results arrive as short herd-result POINTERS (read the output file) — do not reassess the whole task when a pointer lands.",
+  "Spawn workers with no role — they run local, up to maxModelConcurrent at a time, clean per-job context, markdown + owns= for isolation.",
+  "Pass role=think only for an isolated second opinion, plan, or VERIFY on the ranked frontier catalog. Parent already thinks; think is a fresh context, not a smarter model.",
+  "Never dump a whole project on one spawn. Slice work; disjoint owns= for parallel writers.",
+  "Async spawn requires output=. Results arrive as short herd-result POINTERS (read the output file) — do not reassess the whole task when a pointer lands.",
   "Never open-all / ensure loops. Only herd spawn boots panes.",
   "Shared context is run markdown only — panes do not chat to each other.",
   "Use herdr to view/focus; never herdr-run to assign herd jobs. Herdr is the user's view; herd assigns work.",
@@ -149,14 +152,14 @@ export default function (pi: ExtensionAPI) {
 
   let config = loadHerdConfig();
   // Survive /reload so local GPU seats aren't double-booked across factory runs.
-  const localLock = getOrCreateLocalLock(config.local.maxStreams);
+  const localLock = getOrCreateLocalLock(config.maxModelConcurrent);
   const state = createHerdState() as ReturnType<typeof createHerdState> &
     StateExtras;
   state._localHeld = new Set();
 
   function refreshConfig() {
     config = loadHerdConfig();
-    localLock.setMaxStreams(config.local.maxStreams);
+    localLock.setMaxStreams(config.maxModelConcurrent);
   }
 
   // Always dispatch herdr via the refreshable holder (stale pi after reload).
@@ -220,7 +223,7 @@ export default function (pi: ExtensionAPI) {
             jobId: h.jobId,
             model: h.model,
             thinking: h.thinking,
-            difficulty: h.difficulty as "easy" | "medium" | "hard",
+            role: h.role as "do" | "think",
             taskPreview: h.taskPreview,
             output: h.outputPath,
             status: "ok",
@@ -236,7 +239,7 @@ export default function (pi: ExtensionAPI) {
         jobId: h.jobId,
         label: h.label,
         status: event.status,
-        difficulty: h.difficulty,
+        role: h.role,
         model: h.model,
         thinking: h.thinking,
         taskPreview: h.taskPreview,
@@ -321,10 +324,9 @@ export default function (pi: ExtensionAPI) {
     name: "herd",
     label: "herd",
     description:
-      "Difficulty-routed Herdr subagents. Scale bottom-up: many easy/medium spawns; " +
-      "hard for review/think only. Easy prefers local vLLM when free.",
+      "Local-first Herdr subagents. Default spawn is local do. role=think is ranked frontier review/plan/VERIFY only.",
     promptSnippet:
-      "Subagent herd: easy/medium→local first (queue or overflow), hard=review. Results as batched herd-result pointers.",
+      "Subagent herd: omit role → local; role=think → frontier catalog. Results as batched herd-result pointers.",
     promptGuidelines: PROMPT_GUIDELINES,
     parameters: HerdParams,
     // Parallel: async spawn returns quickly; wait/collect still share the same tool.

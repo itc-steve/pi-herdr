@@ -2,6 +2,25 @@
 
 All notable changes to `@itc-steve/pi-herdr` are documented here.
 
+## [1.4.0] — 2026-08-31
+
+### Breaking (with one-release shim)
+
+- Spawn is **default-local**. Omit `role` (or `role=do`) → local implementer. `role=think` (aliases: review, plan, architect, verify) walks a ranked `think[]` catalog.
+- Dropped `easy` / `medium` / `hard` catalogs, `local.maxStreams`, `local.preferOn`, `local.whenFull`. One cap: `maxModelConcurrent` (local seats + per-model cloud seats).
+- Do jobs **queue** when local seats are full. They never overflow onto think.
+- `difficulty=easy|medium|hard` still accepted this release (`easy`/`medium` → do, `hard` → think).
+
+### Added
+
+- Kick banners: LOCAL worker vs cloud THINK pass.
+- Old herd.json leftovers fold remotes into `think` (hard, then medium, then easy).
+- `role=think` with no `model=`: one in-flight per think model; two tasks → one of each; next think rotates to the other (second opinion).
+
+### Docs
+
+- README, skills, and package description match default-local + `think[]`. Dropped the difficulty-era screenshot (`difficulty=hard` spawn).
+
 ## [1.3.1] — 2026-08-27
 
 ### Fixes

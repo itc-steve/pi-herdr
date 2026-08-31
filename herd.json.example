@@ -5,35 +5,11 @@
     "enabled": true,
     "model": "vllm/Qwen/Qwen3.6-27B-FP8",
     "thinking": "medium",
-    "maxStreams": 1,
-    "preflight": true,
-    "preferOn": ["easy", "medium"],
-    "whenFull": "queue"
+    "preflight": true
   },
-  "easy": [
+  "think": [
     {
-      "model": "vllm/Qwen/Qwen3.6-27B-FP8",
-      "thinking": "medium",
-      "local": true
-    },
-    {
-      "model": "openai-codex/gpt-5.6-luna",
-      "thinking": "medium"
-    }
-  ],
-  "medium": [
-    {
-      "model": "grok-cli/grok-4.5",
-      "thinking": "medium"
-    },
-    {
-      "model": "openai-codex/gpt-5.6-terra",
-      "thinking": "medium"
-    }
-  ],
-  "hard": [
-    {
-      "model": "claude-code/claude-opus-5",
+      "model": "grok-cli/grok-4.6",
       "thinking": "high"
     },
     {
