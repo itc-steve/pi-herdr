@@ -52,6 +52,8 @@ export type JobHandle = {
   thinking: string;
   local: boolean;
   role: string;
+  /** Private (secret-dependent) local do worker. */
+  private?: boolean;
 };
 
 function isAbortError(err: unknown): boolean {
@@ -95,9 +97,9 @@ export function outputFileBytes(path: string): number {
 
 export function isOutputReady(path: string, baselineBytes?: number): boolean {
   const size = outputFileBytes(path);
-  if (baselineBytes != null && baselineBytes > 0) {
-    if (size <= baselineBytes) return false;
-  } else if (size === 0) {
+  if (size === 0) return false;
+  // Unchanged size is still pending. Shorter overwrite (spec → summary) is done.
+  if (baselineBytes != null && baselineBytes > 0 && size === baselineBytes) {
     return false;
   }
   try {
@@ -572,8 +574,10 @@ export async function collectReply(opts: {
   herdr: HerdrClient;
   handle: JobHandle;
   signal?: AbortSignal;
+  /** Idempotent redaction chokepoint (cloud parent); identity when omitted. */
+  sanitize?: (text: string) => string;
 }): Promise<{ reply: string; source: "session" | "scrollback" }> {
-  const { herdr, handle, signal } = opts;
+  const { herdr, handle, signal, sanitize } = opts;
 
   const sessionGrew =
     countSessionEntries(handle.sessionFile) > handle.watermark;
@@ -604,6 +608,8 @@ export async function collectReply(opts: {
       `No reply collected for '${handle.jobId}' yet (session watermark=${handle.watermark}).`,
     );
   }
+
+  if (sanitize && reply) reply = sanitize(reply);
 
   if (handle.outputPath) {
     try {

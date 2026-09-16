@@ -2,6 +2,22 @@
 
 All notable changes to `@itc-steve/pi-herdr` are documented here.
 
+## [1.5.0] — 2026-09-16
+
+### Added
+
+- Opt-in **private mode** (`"private": { "enabled": false }` by default). Cloud parents get `[PRIVATE:<category>]` markers instead of detected secrets in tool output, provider requests (including compaction), shell history, summaries, and replayed tool arguments. `herd spawn private=true` forces the configured local model for one secret-dependent step; private workers cannot spawn nested herd jobs. Detector vendored from `@spences10/pi-redact` (Scott Spence, MIT).
+- Strict TypeScript checking through `npm run typecheck`.
+
+### Fixed
+
+- Aborting a queued model slot now cancels it instead of letting it start later.
+- Async monitors no longer wait forever when an `output=` file shrinks relative to its spawn baseline (spec overwritten by a shorter result).
+
+### Breaking
+
+- Node.js 22.19+ is now required, matching current Pi packages and native TypeScript test execution.
+
 ## [1.4.0] — 2026-08-31
 
 ### Breaking (with one-release shim)

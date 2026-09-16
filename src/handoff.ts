@@ -5,6 +5,22 @@ export class HandoffError extends Error {}
 
 const FORBIDDEN_OUTPUT_NAMES = new Set(["meta.json", "journal.jsonl", ".active"]);
 
+const PRIVATE_LOCAL_BANNER = `You are a PRIVATE LOCAL helper.
+
+Perform only the requested secret-dependent operation.
+Do not plan or solve the broader project.
+Do not inspect unrelated files.
+Do not spawn other agents.
+Never return secret values.
+Stop immediately after the requested step succeeds or becomes blocked.
+
+Return only:
+- status: done | blocked
+- actions performed
+- files changed
+- verification result
+- next step for parent agent`;
+
 /**
  * Sandbox a relative handoff path under runDir. Rejects absolute, ~, and ..
  */
@@ -76,12 +92,15 @@ export function buildHandoffKick(opts: {
   laneBlock?: string;
   role?: "do" | "think";
   local?: boolean;
+  private?: boolean;
 }): string {
-  const banner = opts.local
-    ? "You are a LOCAL worker. One slice. Fresh session. Write output=. Do not plan the whole project."
-    : opts.role === "think"
-      ? "You are a cloud THINK pass (second opinion / plan / review). Read the run markdown. Do not take over implementation."
-      : "";
+  const banner = opts.private
+    ? PRIVATE_LOCAL_BANNER
+    : opts.local
+      ? "You are a LOCAL worker. One slice. Fresh session. Write output=. Do not plan the whole project."
+      : opts.role === "think"
+        ? "You are a cloud THINK pass (second opinion / plan / review). Read the run markdown. Do not take over implementation."
+        : "";
   const lines = [
     ...(banner ? [banner, ""] : []),
     opts.task.trim(),

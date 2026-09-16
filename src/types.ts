@@ -25,6 +25,10 @@ export interface LocalConfig {
   preflight: boolean;
 }
 
+export interface PrivateConfig {
+  enabled: boolean;
+}
+
 export interface HerdDefaults {
   isolation: IsolationMode;
   timeoutMs: number;
@@ -43,6 +47,7 @@ export interface HerdConfig {
   local: LocalConfig;
   /** Ordered frontier rank. Index 0 = best. */
   think: CatalogEntry[];
+  private: PrivateConfig;
   defaults: HerdDefaults;
 }
 
@@ -67,6 +72,8 @@ export interface ManagedJob {
   role: Role;
   runId: string | null;
   outputPath?: string;
+  outputBaselineBytes?: number;
+  private?: boolean;
   owns?: string[];
   forbid?: string[];
   watermark?: number;

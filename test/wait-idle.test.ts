@@ -23,7 +23,12 @@ function pane(status: AgentStatus): PaneInfo {
 function herdr(getStatus: () => AgentStatus): HerdrClient {
   return {
     getPaneInfo: async () => pane(getStatus()),
-    waitAgentStatus: async (_p, _s, timeoutMs, signal) => {
+    waitAgentStatus: async (
+      _p: string,
+      _s: AgentStatus,
+      timeoutMs: number,
+      signal?: AbortSignal,
+    ) => {
       const slice = Math.min(Math.max(1, timeoutMs), 15);
       await new Promise<void>((resolve, reject) => {
         const t = setTimeout(resolve, slice);

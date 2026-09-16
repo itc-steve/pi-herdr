@@ -17,6 +17,9 @@
       "thinking": "high"
     }
   ],
+  "private": {
+    "enabled": false
+  },
   "defaults": {
     "isolation": "none",
     "timeoutMs": 600000,

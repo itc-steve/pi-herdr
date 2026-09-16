@@ -83,6 +83,75 @@ describe("parseHerdConfig", () => {
   });
 });
 
+describe("private config", () => {
+  it("default object has private.enabled false", () => {
+    const obj = defaultConfigObject();
+    assert.deepEqual(obj.private, { enabled: false });
+    assert.equal(parseHerdConfig(obj).private.enabled, false);
+  });
+
+  it("omitted private key defaults to disabled", () => {
+    const cfg = parseHerdConfig({
+      local: { model: "Vllm/X", thinking: "low" },
+    });
+    assert.equal(cfg.private.enabled, false);
+  });
+
+  it("private: {} leaves enabled false", () => {
+    const cfg = parseHerdConfig({
+      local: { model: "Vllm/X", thinking: "low" },
+      private: {},
+    });
+    assert.equal(cfg.private.enabled, false);
+  });
+
+  it("explicit false keeps private disabled", () => {
+    const cfg = parseHerdConfig({
+      local: { model: "Vllm/X", thinking: "low" },
+      private: { enabled: false },
+    });
+    assert.equal(cfg.private.enabled, false);
+  });
+
+  it("explicit true enables private mode", () => {
+    const cfg = parseHerdConfig({
+      local: { model: "Vllm/X", thinking: "low" },
+      private: { enabled: true },
+    });
+    assert.equal(cfg.private.enabled, true);
+  });
+
+  it("non-boolean enabled throws", () => {
+    assert.throws(
+      () =>
+        parseHerdConfig({
+          local: { model: "Vllm/X", thinking: "low" },
+          private: { enabled: "yes" },
+        }),
+      /boolean/,
+    );
+    assert.throws(
+      () =>
+        parseHerdConfig({
+          local: { model: "Vllm/X", thinking: "low" },
+          private: { enabled: 1 },
+        }),
+      /boolean/,
+    );
+  });
+
+  it("non-object private throws", () => {
+    assert.throws(
+      () =>
+        parseHerdConfig({
+          local: { model: "Vllm/X", thinking: "low" },
+          private: "on",
+        }),
+      /object/,
+    );
+  });
+});
+
 describe("resolveRole", () => {
   it("defaults to do", () => {
     assert.equal(resolveRole({}).role, "do");

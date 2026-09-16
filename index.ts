@@ -6,6 +6,15 @@ import {
   CompetingPackageError,
 } from "./src/conflict.ts";
 import { ensureHerdConfigFile, loadHerdConfig } from "./src/config.ts";
+import {
+  createPrivateKeyContinuationTracker,
+  hasPrivateMarker,
+  isPrivateKeyPath,
+  isSshConfigPath,
+  redactContextMessages,
+  redactForCloud,
+  redactProviderPayload,
+} from "./src/private.ts";
 import { createHerdState } from "./src/state.ts";
 import { executeHerd } from "./src/herd/actions.ts";
 import {
@@ -102,6 +111,12 @@ const HerdParams = Type.Object({
   owns: Type.Optional(Type.String()),
   forbid: Type.Optional(Type.String()),
   waitForReply: Type.Optional(Type.Boolean()),
+  private: Type.Optional(
+    Type.Boolean({
+      description:
+        "Force local private worker. Requires private.enabled. Rejects role=think and non-local model=.",
+    }),
+  ),
   jobId: Type.Optional(Type.String()),
   all: Type.Optional(Type.Boolean()),
   timeoutMs: Type.Optional(Type.Number()),
@@ -116,7 +131,12 @@ const PROMPT_GUIDELINES = [
   "Never open-all / ensure loops. Only herd spawn boots panes.",
   "Shared context is run markdown only — panes do not chat to each other.",
   "Use herdr to view/focus; never herdr-run to assign herd jobs. Herdr is the user's view; herd assigns work.",
+  "When private mode is enabled and tool output contains `[PRIVATE:…]`, call herd with action=spawn and private=true for one narrow secret-dependent operation. Do not use alternate retrieval tools. Do not ask the worker to reveal values.",
 ];
+
+/** Appended to redacted tool results that newly gained a [PRIVATE: marker. */
+const PRIVATE_SPAWN_GUIDANCE =
+  'Private data withheld. If required for current task, call herd with action="spawn" and private=true. Give worker one narrow operation. Worker reruns operation locally and reports status without secret values. Do not use alternate retrieval tools.';
 
 type StateExtras = {
   _localHeld?: Set<string>;
@@ -162,6 +182,34 @@ export default function (pi: ExtensionAPI) {
     localLock.setMaxStreams(config.maxModelConcurrent);
   }
 
+  // ── Private mode: cloud-parent redaction ─────────────────────────────
+  // Local model = identity. Cloud parent = redact before anything reaches the
+  // provider. Identity tracks the parent model from ctx on agent_start and
+  // tool/command execution.
+  let currentModelIdentity: string | undefined;
+  const privateKeyTracker = createPrivateKeyContinuationTracker();
+
+  function cloudIdentity(ctx?: Pick<ExtensionContext, "model">): string | undefined {
+    const m = ctx?.model;
+    return m?.provider && m?.id ? `${m.provider}/${m.id}` : undefined;
+  }
+
+  function noteModelIdentity(ctx?: Pick<ExtensionContext, "model">): void {
+    const id = cloudIdentity(ctx);
+    if (id) currentModelIdentity = id;
+  }
+
+  function isCloudIdentity(identity: string | undefined): boolean {
+    // Unknown identity fail-closed: only the configured local model bypasses.
+    return config.private.enabled && identity !== config.local.model;
+  }
+
+  /** Identity when feature off or local parent; redacts otherwise. Idempotent. */
+  function sanitizeForCloud(text: string): string {
+    if (!isCloudIdentity(currentModelIdentity)) return text;
+    return redactForCloud(text).redacted;
+  }
+
   // Always dispatch herdr via the refreshable holder (stale pi after reload).
   const herdrClient = isHerdrEnv()
     ? createHerdrClient((command, args, options) =>
@@ -202,6 +250,7 @@ export default function (pi: ExtensionAPI) {
       return config.maxModelConcurrent;
     },
     herdr: () => herdrClient,
+    sanitizeReply: (text) => sanitizeForCloud(text),
     onChange: () => {
       refreshSurfaces();
     },
@@ -235,6 +284,10 @@ export default function (pi: ExtensionAPI) {
       }
 
       refreshConfig();
+      // Cloud parent: redact before the 4000-char truncation inside
+      // formatHerdResultMessage (truncation cannot see what was redacted).
+      const reply = event.reply != null ? sanitizeForCloud(event.reply) : event.reply;
+      const error = event.error != null ? sanitizeForCloud(event.error) : event.error;
       const content = formatHerdResultMessage({
         jobId: h.jobId,
         label: h.label,
@@ -246,8 +299,8 @@ export default function (pi: ExtensionAPI) {
         runId: h.runId,
         outputPath: h.outputPath,
         owns: h.owns,
-        reply: event.reply,
-        error: event.error,
+        reply,
+        error,
         resultDelivery: config.defaults.resultDelivery,
       });
 
@@ -290,10 +343,12 @@ export default function (pi: ExtensionAPI) {
     localLock,
     herdr: () => herdrClient,
     monitor,
+    sanitizeForCloud,
   };
 
   pi.on("session_start", async (_event, ctx) => {
     refreshPiHolder(holder, pi);
+    noteModelIdentity(ctx);
     parentIdle = ctx.isIdle?.() !== false;
     // Only arm tools that this factory actually registered.
     ensureHerdToolsActive(
@@ -305,7 +360,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_start", async (_event, ctx) => {
     parentIdle = false;
+    noteModelIdentity(ctx);
     refreshSurfaces(ctx);
+  });
+
+  pi.on("model_select", async (_event, ctx) => {
+    noteModelIdentity(ctx);
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
@@ -316,6 +376,67 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     monitor.dispose();
     ui.clear();
+  });
+
+  // Cloud parent: redact tool results before they enter LLM context. Feature
+  // off or local model → identity (early return, zero overhead).
+  pi.on("tool_result", async (event, ctx) => {
+    if (!isCloudIdentity(cloudIdentity(ctx))) return;
+    const input = event.input as Record<string, unknown>;
+    const path = typeof input.path === "string" ? input.path : undefined;
+    const command = typeof input.command === "string" ? input.command : "";
+    const commandReadsPrivateKey = command
+      .split(/\s+/)
+      .some((part) => isPrivateKeyPath(part.replace(/^[<>()'\"]+|[<>()'\";|&]+$/g, "")));
+    const forcePrivateKey =
+      isPrivateKeyPath(path) ||
+      commandReadsPrivateKey ||
+      (event.toolName === "read" && privateKeyTracker.forcePrivateKey(path));
+    const forceSshConfig = isSshConfigPath(path);
+
+    let total = 0;
+    let forcePK = forcePrivateKey;
+    const content = event.content.map((block) => {
+      if (block.type !== "text") return block; // images untouched
+      const r = redactForCloud(block.text, {
+        forceSshConfig: forceSshConfig || undefined,
+        forcePrivateKey: forcePK || undefined,
+      });
+      if (event.toolName === "read") {
+        privateKeyTracker.noteChunk(path, block.text);
+        forcePK = privateKeyTracker.forcePrivateKey(path);
+      }
+      if (r.count === 0) return block;
+      total += r.count;
+      let text = r.redacted;
+      if (
+        !hasPrivateMarker(block.text) &&
+        hasPrivateMarker(text) &&
+        !text.includes("Private data withheld.")
+      ) {
+        text = `${text}\n\n${PRIVATE_SPAWN_GUIDANCE}`;
+      }
+      return { ...block, text };
+    });
+
+    if (total === 0) return;
+    return { content };
+  });
+
+  // Cloud parent: redact session history before each LLM call (also covers
+  // local→cloud model switch — context fires on a copy every call).
+  pi.on("context", async (event, ctx) => {
+    if (!isCloudIdentity(cloudIdentity(ctx))) return;
+    if (!redactContextMessages(event.messages)) return;
+    return { messages: event.messages };
+  });
+
+  // Compaction and branch summarization bypass the context event. Redact the
+  // final wire payload so every cloud-provider request is covered.
+  pi.on("before_provider_request", async (event, ctx) => {
+    if (!isCloudIdentity(cloudIdentity(ctx))) return;
+    if (!redactProviderPayload(event.payload)) return;
+    return event.payload;
   });
 
   registerHerdrTool(pi);
@@ -333,6 +454,7 @@ export default function (pi: ExtensionAPI) {
     executionMode: "parallel",
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       refreshSurfaces(ctx);
+      noteModelIdentity(ctx);
       try {
         const result = await executeHerd(
           runtime,
@@ -362,6 +484,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       refreshPiHolder(holder, pi);
       refreshSurfaces(ctx);
+      noteModelIdentity(ctx);
       try {
         let params;
         try {

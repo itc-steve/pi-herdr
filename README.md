@@ -31,13 +31,14 @@ Then `/reload`. Use `/herd help` for slash usage.
 
 ## Requirements
 
+- Node.js ≥ 22.19
 - [Pi coding agent](https://github.com/earendil-works/pi)
 - [Herdr](https://herdr.dev) (terminal workspace / agent multiplexer)
 - Models listed in config must already be available to Pi (local vLLM/SGLang, Grok CLI, etc.)
 
 ## Config
 
-Copy [herd.json.example](./herd.json.example) to `~/.pi/agent/herd.json` (created automatically on first `models` / `run` if missing):
+Copy [herd.json.example](./herd.json.example) to `~/.pi/agent/herd.json` (created automatically on first `models`, `run`, or `journal` if missing):
 
 ```json
 {
@@ -53,6 +54,7 @@ Copy [herd.json.example](./herd.json.example) to `~/.pi/agent/herd.json` (create
     { "model": "grok-cli/grok-4.6", "thinking": "high" },
     { "model": "openai-codex/gpt-5.6-sol", "thinking": "high" }
   ],
+  "private": { "enabled": false },
   "defaults": {
     "isolation": "none",
     "timeoutMs": 600000,
@@ -76,6 +78,7 @@ Old `easy` / `medium` / `hard` catalogs still parse: remotes fold into `think` (
 | `maxModelConcurrent` | Cap on **local seats** and on in-flight jobs **per exact provider/model** |
 | `local` | Default implementer: model id, thinking, optional preflight |
 | `think` | Ordered frontier catalog for `role=think` |
+| `private.enabled` | Opt-in cloud redaction + `private=true` spawn (default **false**) |
 | `defaults.isolation` | ignored; writers share the tree (`owns=` is the isolation) |
 | `defaults.requireOutput` | Async spawn must declare `output=` |
 | `defaults.resultDelivery` | `pointer` (default: path only) or `full` (paste reply) |
@@ -103,6 +106,26 @@ One-release shim: `difficulty=easy\|medium` → do, `difficulty=hard` → think.
 2. Extra do jobs **wait** for a free seat.
 3. Each job gets a **fresh** `sessions/<job>.jsonl`.
 4. Kick banner: *You are a LOCAL worker. One slice…*
+
+### Private mode (opt-in)
+
+Default **off**. Set `"private": { "enabled": true }` in `herd.json`.
+
+When on, a **cloud** parent (active model ≠ `local.model`) sees `[PRIVATE:<category>]` instead of detected secrets in tool output, shell output, provider requests (including compaction), and herd-result text. The configured local model is trusted and is not redacted. Detection is regex/field-name based (vendored from `@spences10/pi-redact`, MIT) — not a guarantee; novel formats, assembled values, and secrets inside images can miss.
+
+No auto-spawn. If the current task needs a withheld value, the cloud agent calls:
+
+```text
+herd spawn private=true task="…one secret-dependent step…" output=private-check.md
+```
+
+That spawn requires `private.enabled` and `local.enabled=true`, claims a normal local seat (FIFO queue if local seats are busy — never overflow to cloud), and rejects `role=think` / non-local `model=`. Private workers cannot spawn nested herd jobs. A `[PRIVATE:]` marker in a non-private spawn is rejected while private mode is enabled — retry with `private=true`.
+
+The private worker reruns the operation locally. It must not plan the project, inspect unrelated files, spawn agents, or return secret values. Replies/errors back to a cloud parent are redacted again before delivery (and before the 4000-char paste cap). Journal never stores the reply.
+
+Do not use alternate retrieval tools to recover a marker. Do not ask the worker to print the value.
+
+`local.model` is a trust assertion: if that id is actually a remote endpoint, private mode will treat it as local and skip redaction.
 
 ### Handoff runs
 
@@ -146,7 +169,7 @@ Async jobs are monitored in the background.
 | `models` | Show local seats + ranked think catalog |
 | `status` | Active monitors / local seats |
 | `run` | `create` / `list` / `use` / `show` handoff folders |
-| `spawn` | Boot a pane, submit task (async needs `output=`; `role=think` optional) |
+| `spawn` | Boot a pane, submit task (async needs `output=`; `role=think` optional; `private=true` for secret-dependent local work) |
 | `steer` / `abort` | Nudge or stop a job |
 | `wait` / `collect` | Block until idle / harvest reply |
 | `close` / `reset` | Close panes / clear monitors |
@@ -159,6 +182,7 @@ herd run create name=demo goal="Summarize this repo"
 herd spawn task="Fill context.md from the repo" output=context.md
 herd spawn task="Implement src/client.ts" output=progress-core.md owns=src/client.ts
 herd spawn role=think task="Review progress-*.md; note gaps" output=progress-review.md
+herd spawn private=true task="One secret-dependent check" output=private-check.md
 ```
 
 Exact model override:
@@ -176,6 +200,7 @@ herd spawn model=grok-cli/grok-4.6 task="…" output=notes.md
 /herd run create name=<slug> goal="…"
 /herd spawn task="…" output=file.md
 /herd spawn role=think task="…" output=review.md
+/herd spawn private=true task="…" output=private-check.md
 ```
 
 ### `herdr` (view / control)
@@ -196,7 +221,7 @@ While monitors or local streams are active: `herd: N mon +local M`. Hidden when 
 npm test
 ```
 
-Tests use Node’s built-in runner with `--experimental-strip-types` (Node ≥ 18).
+Tests use Node’s built-in runner with `--experimental-strip-types` (Node ≥ 22.19). Run `npm run typecheck` for strict TypeScript checks.
 
 ## Changelog
 

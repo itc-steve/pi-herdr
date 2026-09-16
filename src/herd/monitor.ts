@@ -70,6 +70,7 @@ export function createHerdMonitor(opts: {
   herdr: () => HerdrClient | null;
   onChange?: () => void;
   onComplete: MonitorCompleteHandler;
+  sanitizeReply?: (text: string) => string;
 }) {
   const jobs = new Map<string, MonitorJob>();
   const controllers = new Map<string, AbortController>();
@@ -324,7 +325,11 @@ export function createHerdMonitor(opts: {
 
     notifyChange();
     try {
-      await acquireSlot(ticketId, model, signal, lane?.slotMax);
+      const controllerSignal = controllers.get(ticketId)!.signal;
+      const slotSignal = signal
+        ? AbortSignal.any([signal, controllerSignal])
+        : controllerSignal;
+      await acquireSlot(ticketId, model, slotSignal, lane?.slotMax);
       placeholder.status = "running";
       notifyChange();
       return ticketId;
@@ -386,6 +391,7 @@ export function createHerdMonitor(opts: {
           herdr,
           handle: optsWatch.handle,
           signal: ac.signal,
+          sanitize: opts.sanitizeReply,
         });
 
         job.status = "done";
@@ -440,6 +446,10 @@ export function createHerdMonitor(opts: {
       ) {
         if (job.status === "running" || job.status === "queued") {
           controllers.get(id)?.abort();
+          const waiterIndex = slotWaiters.findIndex((w) => w.ticketId === id);
+          if (waiterIndex !== -1) {
+            slotWaiters.splice(waiterIndex, 1)[0]?.reject(new Error("Aborted"));
+          }
           aborted.push(id);
         }
       }

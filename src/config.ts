@@ -7,6 +7,7 @@ import type {
   HerdDefaults,
   IsolationMode,
   LocalConfig,
+  PrivateConfig,
   ResultDelivery,
   Role,
 } from "./types.ts";
@@ -101,6 +102,20 @@ function normalizeLocal(raw: unknown): LocalConfig {
   };
 }
 
+function normalizePrivate(raw: unknown): PrivateConfig {
+  const obj = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : undefined;
+  if (raw != null && obj === undefined) {
+    throw new Error('herd.json "private" must be an object');
+  }
+  const enabled = obj?.enabled;
+  if (enabled !== undefined && typeof enabled !== "boolean") {
+    throw new Error("herd.json private.enabled must be a boolean");
+  }
+  return { enabled: enabled === true };
+}
+
 function normalizeDefaults(raw: unknown): HerdDefaults {
   const obj =
     raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
@@ -185,6 +200,7 @@ export function parseHerdConfig(raw: unknown): HerdConfig {
 
   const local = normalizeLocal(obj.local);
   const think = foldThink(obj, local.model);
+  const privateConfig = normalizePrivate(obj.private);
 
   if (!local.enabled && think.length === 0) {
     throw new Error(
@@ -198,6 +214,7 @@ export function parseHerdConfig(raw: unknown): HerdConfig {
     maxModelConcurrent,
     local,
     think,
+    private: privateConfig,
     defaults: normalizeDefaults(obj.defaults),
   };
 }
@@ -247,6 +264,7 @@ export function defaultConfigObject(): Record<string, unknown> {
         thinking: "high",
       },
     ],
+    private: { enabled: false },
     defaults: {
       isolation: "none",
       timeoutMs: DEFAULT_TIMEOUT_MS,

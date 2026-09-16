@@ -24,6 +24,7 @@ Never dump a whole project on one spawn. Slice; use disjoint `owns=` for paralle
 - Async spawn **requires** `output=` (artifact under the active run).
 - Exact `model=` optional escape hatch; local models still take a local seat.
 - One-release shim: `difficulty=easy|medium` → do, `hard` → think.
+- `[PRIVATE:…]` in tool output → `herd spawn private=true` for **one** secret-dependent operation. Worker reruns it locally and reports status. Do not use other retrieval tools. Do not ask it to reveal values. Requires `private.enabled` and enabled local model. Rejects `role=think`, non-local `model=`, and every child spawn. Queues a local seat; never overflow to cloud.
 
 ```
 herd run create name=auth-bug goal="Fix login redirect"
@@ -31,6 +32,7 @@ herd run create name=auth-bug goal="Fix login redirect"
 herd spawn task="Summarize skill into context.md" output=context.md
 herd spawn task="Implement src/client.ts" output=progress-core.md owns=src/client.ts
 herd spawn role=think task="Review progress-*.md; note gaps; VERIFY tsc" output=progress-review.md
+herd spawn private=true task="Use local credentials for this one check. Do not implement." output=private-check.md
 ```
 
 ## Results

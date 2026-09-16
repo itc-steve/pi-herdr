@@ -15,7 +15,7 @@ import {
   HerdSlashHelpError,
   getHerdSlashCompletions,
 } from "../src/herd/slash.ts";
-import { spawnJob } from "../src/herd/spawn.ts";
+import { spawnJob, type SpawnParams } from "../src/herd/spawn.ts";
 import { buildHandoffKick } from "../src/handoff.ts";
 import { parseHerdConfig, defaultConfigObject } from "../src/config.ts";
 import { createLocalStreamLock } from "../src/local-lock.ts";
@@ -37,6 +37,8 @@ describe("boot helpers", () => {
     assert.equal(isOutputReady(path, 0), true);
     assert.equal(isOutputReady(path, 2), false);
     writeFileSync(path, "hello");
+    assert.equal(isOutputReady(path, 2), true);
+    writeFileSync(path, "x");
     assert.equal(isOutputReady(path, 2), true);
   });
 
@@ -208,5 +210,225 @@ describe("slash parse", () => {
     assert.ok(filtered?.some((i) => i.value === "spawn"));
     const run = getHerdSlashCompletions("run ");
     assert.ok(run?.every((i) => typeof i.value === "string" && i.value.length));
+  });
+});
+
+describe("private spawn contract", () => {
+  type Harness = {
+    config: ReturnType<typeof parseHerdConfig>;
+    herdr: HerdrClient;
+    monitor: HerdMonitor;
+    localLock: ReturnType<typeof createLocalStreamLock>;
+    state: ReturnType<typeof createHerdState>;
+    createTabCalls: () => number;
+    bootedCmds: () => string[];
+  };
+
+  function spawnHarness(privateEnabled: boolean): Harness {
+    const sessionDir = mkdtempSync(join(tmpdir(), "herd-pvt-"));
+    const defaults = defaultConfigObject();
+    const config = parseHerdConfig({
+      ...defaults,
+      sessionDir,
+      private: { enabled: privateEnabled },
+      local: { ...(defaults.local as object), preflight: false },
+    });
+    createRun(sessionDir, "pvt-test");
+    const pane = {
+      pane_id: "w1:p2",
+      workspace_id: "w1",
+      tab_id: "w1:t2",
+      focused: false,
+      agent: "pi",
+      agent_status: "idle" as const,
+      revision: 1,
+    };
+    let status: "idle" | "working" = "idle";
+    let createTabCalls = 0;
+    const booted: string[] = [];
+    const herdr = {
+      getCurrentPaneInfo: async () =>
+        ({ ...pane, pane_id: "w1:p1", tab_id: "w1:t1" }),
+      getTabList: async () => [],
+      createTab: async () => {
+        createTabCalls++;
+        return { tab: { tab_id: pane.tab_id, workspace_id: "w1" }, paneId: pane.pane_id };
+      },
+      renamePane: async () => {},
+      readPane: async () => "$ ",
+      runInPane: async (_paneId: string, command: string) => {
+        booted.push(command);
+        if (!command.includes("pi --model")) status = "working";
+      },
+      getPaneInfo: async () => ({ ...pane, agent_status: status }),
+    } as unknown as HerdrClient;
+    const monitor = {
+      inFlightLaneClaims: () => [],
+      reserveSlot: async () => "slot-1",
+      modelInUse: () => 0,
+      thinkLoad: () => 0,
+      claimThinkPick: (catalog: { model: string; thinking: string }[]) => ({
+        entry: catalog[0]!,
+        queued: false,
+      }),
+      releaseThinkHold: () => {},
+      attachAndWatch: () => ({}),
+      releaseTicket: () => {},
+    } as unknown as HerdMonitor;
+    return {
+      config,
+      herdr,
+      monitor,
+      localLock: createLocalStreamLock(1),
+      state: createHerdState(),
+      createTabCalls: () => createTabCalls,
+      bootedCmds: () => booted,
+    };
+  }
+
+  function spawnOpts(h: Harness, params: SpawnParams) {
+    return {
+      config: h.config,
+      params,
+      state: h.state,
+      localLock: h.localLock,
+      herdr: h.herdr,
+      monitor: h.monitor,
+    };
+  }
+
+  it("private kick banner replaces the generic LOCAL worker banner", () => {
+    const kick = buildHandoffKick({
+      task: "rotate the token",
+      runDir: "/run",
+      reads: [],
+      output: "out.md",
+      private: true,
+      local: true,
+      role: "do",
+    });
+    assert.match(kick, /PRIVATE LOCAL helper/);
+    assert.match(kick, /status: done \| blocked/);
+    assert.match(kick, /Never return secret values/);
+    assert.ok(!kick.includes("LOCAL worker"));
+  });
+
+  it("slash spawn private=true parses to private === true", () => {
+    const p = parseHerdSlashArgs(
+      `spawn private=true task="x" output=a.md`,
+    ) as Record<string, unknown>;
+    assert.equal(p.action, "spawn");
+    assert.equal(p.private, true);
+    assert.equal(p.task, "x");
+    assert.equal(p.output, "a.md");
+  });
+
+  it("private=true with private.enabled=false throws before boot", async () => {
+    const h = spawnHarness(false);
+    await assert.rejects(
+      spawnJob(spawnOpts(h, {
+        task: "use [PRIVATE:GitHub Token]",
+        output: "o.md",
+        private: true,
+      })),
+      /"private": \{ "enabled": true \}/,
+    );
+    assert.equal(h.createTabCalls(), 0);
+  });
+
+  it("private + role=think (or difficulty=hard) throws", async () => {
+    const h = spawnHarness(true);
+    await assert.rejects(
+      spawnJob(spawnOpts(h, { task: "t", output: "o.md", private: true, role: "think" })),
+      /local do only/,
+    );
+    await assert.rejects(
+      spawnJob(spawnOpts(h, { task: "t", output: "o.md", private: true, difficulty: "hard" })),
+      /local do only/,
+    );
+    assert.equal(h.createTabCalls(), 0);
+  });
+
+  it("private + model= that is not the local model throws", async () => {
+    const h = spawnHarness(true);
+    await assert.rejects(
+      spawnJob(spawnOpts(h, {
+        task: "t",
+        output: "o.md",
+        private: true,
+        model: "grok-cli/grok-4.6",
+      })),
+      /must be exactly the local model/,
+    );
+    assert.equal(h.createTabCalls(), 0);
+  });
+
+  it("private worker cannot spawn any nested job", async () => {
+    const h = spawnHarness(true);
+    assert.equal(h.localLock.tryAcquire("j00"), true);
+    process.env.PI_HERD_PRIVATE = "1";
+    try {
+      await assert.rejects(
+        spawnJob({
+          ...spawnOpts(h, { task: "t", output: "o.md" }),
+          parentSignal: AbortSignal.timeout(30),
+        }),
+        /cannot spawn further jobs/,
+      );
+      await assert.rejects(
+        spawnJob({
+          ...spawnOpts(h, { task: "t", output: "o.md", role: "think" }),
+          parentSignal: AbortSignal.timeout(30),
+        }),
+        /cannot spawn further jobs/,
+      );
+    } finally {
+      delete process.env.PI_HERD_PRIVATE;
+      h.localLock.release("j00");
+    }
+    assert.equal(h.createTabCalls(), 0);
+    assert.equal(h.localLock.queued(), 0);
+  });
+
+  it("allows literal [PRIVATE: text when private mode is disabled", async () => {
+    const h = spawnHarness(false);
+    await spawnJob(spawnOpts(h, {
+      task: "test [PRIVATE: marker handling",
+      output: "o.md",
+    }));
+    assert.equal(h.createTabCalls(), 1);
+  });
+
+  it("requires private=true when task or reads contains a private marker", async () => {
+    const h = spawnHarness(true);
+    for (const params of [
+      { task: "use [PRIVATE:value]", output: "o.md" },
+      { task: "use context", reads: "[PRIVATE:value]", output: "o.md" },
+    ]) {
+      await assert.rejects(spawnJob(spawnOpts(h, params)), /private=true/);
+    }
+    assert.equal(h.createTabCalls(), 0);
+  });
+
+  it("rejects private spawn when local execution is disabled", async () => {
+    const h = spawnHarness(true);
+    h.config.local.enabled = false;
+    await assert.rejects(
+      spawnJob(spawnOpts(h, { task: "t", output: "o.md", private: true })),
+      /local.enabled=true/,
+    );
+    assert.equal(h.createTabCalls(), 0);
+  });
+
+  it("accepted private spawn uses portable env and marks handle private", async () => {
+    const h = spawnHarness(true);
+    const res = await spawnJob(
+      spawnOpts(h, { task: "rotate the token", output: "o.md", private: true }),
+    );
+    assert.equal(h.createTabCalls(), 1);
+    assert.ok(
+      h.bootedCmds().some((c) => c.startsWith("env PI_HERD_PRIVATE=1 pi --model")),
+    );
+    assert.equal((res.handle as { private?: boolean } | undefined)?.private, true);
   });
 });

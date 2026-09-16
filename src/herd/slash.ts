@@ -10,7 +10,7 @@ export const HERD_SLASH_HELP = `herd — Pi subagent herd (default-local, option
   /herd run use <id>
   /herd run show <id>
   /herd journal
-  /herd spawn task="…" output=file.md [role=think] [model=…] [owns=…]
+  /herd spawn task="…" output=file.md [role=think] [model=…] [owns=…] [private=true]
 
 Roles:
   (omit) / do — local implementer (default)
@@ -20,6 +20,7 @@ Rules:
   - role is optional; missing = local do
   - async spawn requires output=
   - multi-writer needs disjoint owns= (plan Parallel lanes first)
+  - private=true forces local do (secret-dependent ops; needs "private": { "enabled": true })
   - use herdr tool to view/focus panes — not to assign jobs
 `;
 
@@ -193,6 +194,11 @@ export function getHerdSlashCompletions(
         value: 'role=think task="" output=',
         label: "spawn think …",
         description: "Ranked frontier review/plan/VERIFY",
+      },
+      {
+        value: 'private=true task="" output=',
+        label: "spawn private local …",
+        description: "Secret-dependent op; local do only",
       },
     ]);
   }

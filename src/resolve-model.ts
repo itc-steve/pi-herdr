@@ -283,6 +283,7 @@ export function formatModelsList(
     `maxModelConcurrent: ${config.maxModelConcurrent} (local seats + per provider/model)`,
     `resultDelivery: ${config.defaults.resultDelivery} ` +
       `triggerTurnOnResult: ${config.defaults.triggerTurnOnResult}`,
+    `private: ${config.private.enabled ? "on" : "off"}`,
     "",
     "think (1 at a time per model; next think rotates):",
   ];

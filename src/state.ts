@@ -1,5 +1,5 @@
-import type { ManagedJob } from "../types.ts";
-import type { LaneClaim } from "../lanes.ts";
+import type { ManagedJob } from "./types.ts";
+import type { LaneClaim } from "./lanes.ts";
 
 export type HerdState = {
   jobs: Record<string, ManagedJob>;

@@ -41,7 +41,8 @@ import {
 } from "./boot.ts";
 import type { HerdMonitor } from "./monitor.ts";
 import { countSessionEntries } from "../readback.ts";
-import { bootCommand } from "../config.ts";
+import { bootCommand, resolveRole } from "../config.ts";
+import { hasPrivateMarker } from "../private.ts";
 
 export class SpawnError extends Error {}
 
@@ -57,6 +58,8 @@ export type SpawnParams = {
   output?: string;
   owns?: string;
   forbid?: string;
+  /** Explicit private=true spawn (secret-dependent local do only). */
+  private?: boolean;
   waitForReply?: boolean;
   timeoutMs?: number;
   cwd?: string;
@@ -77,10 +80,54 @@ export async function spawnJob(opts: {
   monitor: HerdMonitor;
   modelProbe?: ModelProbeFn;
   parentSignal?: AbortSignal;
+  /** Idempotent redaction hook for collected replies (private spawn). */
+  sanitizeReply?: (text: string) => string;
 }): Promise<SpawnResult> {
   const { config, params, state, localLock, herdr, monitor } = opts;
   const task = params.task?.trim();
   if (!task) throw new SpawnError("task is required");
+
+  // Private contract — reject BEFORE any seat claim / reserveSlot / boot.
+  // Prompt instructions are not a security boundary: private workers cannot fan out.
+  if (process.env.PI_HERD_PRIVATE === "1") {
+    throw new SpawnError("private workers cannot spawn further jobs.");
+  }
+  const isPrivate = params.private === true;
+  if (isPrivate) {
+    if (!config.private.enabled) {
+      throw new SpawnError(
+        'private spawn is not enabled. Set "private": { "enabled": true } ' +
+          "in ~/.pi/agent/herd.json and retry.",
+      );
+    }
+    if (!config.local.enabled) {
+      throw new SpawnError("private spawn requires local.enabled=true.");
+    }
+    const { role } = resolveRole({
+      role: params.role,
+      difficulty: params.difficulty,
+    });
+    if (role === "think") {
+      throw new SpawnError(
+        "private spawn is local do only — role=think (aliases review/plan/"
+          + "architect/verify, difficulty=hard) is rejected.",
+      );
+    }
+    const model = params.model?.trim();
+    if (model && model !== config.local.model) {
+      throw new SpawnError(
+        `private spawn model= must be exactly the local model ` +
+          `(got '${model}', expected '${config.local.model}').`,
+      );
+    }
+  } else if (
+    config.private.enabled &&
+    (hasPrivateMarker(task) || hasPrivateMarker(params.reads ?? ""))
+  ) {
+    throw new SpawnError(
+      "task/reads contains a [PRIVATE: marker. Retry this spawn with private=true.",
+    );
+  }
 
   const waitForReply = params.waitForReply === true;
   const requireOutput = config.defaults.requireOutput && !waitForReply;
@@ -113,9 +160,9 @@ export async function spawnJob(opts: {
     const claimed = await resolveModelClaimingLocal(
       config,
       {
-        role: params.role,
-        difficulty: params.difficulty,
-        model: params.model,
+        role: isPrivate ? "do" : params.role,
+        difficulty: isPrivate ? undefined : params.difficulty,
+        model: isPrivate ? config.local.model : params.model,
         thinking: params.thinking,
         jobId,
         modelInUse: (m) => opts.monitor.thinkLoad(m),
@@ -185,13 +232,18 @@ export async function spawnJob(opts: {
       laneBlock,
       role: resolved.role,
       local: resolved.local,
+      private: isPrivate || undefined,
     });
 
-    const bootCmd = bootCommand(
+    const baseBootCmd = bootCommand(
       resolved.model,
       resolved.thinking,
       sessionFile,
     );
+    // Nested-spawn marker inherited by the child process.
+    const bootCmd = isPrivate
+      ? `env PI_HERD_PRIVATE=1 ${baseBootCmd}`
+      : baseBootCmd;
     const cwd = params.cwd?.trim() || process.cwd();
     const bootTimeout = Math.min(
       params.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS,
@@ -218,7 +270,7 @@ export async function spawnJob(opts: {
       signal: opts.parentSignal,
     });
 
-    const handle: JobHandle = {
+    const handle = {
       jobId,
       label,
       paneId,
@@ -235,7 +287,8 @@ export async function spawnJob(opts: {
       thinking: resolved.thinking,
       local: resolved.local,
       role: resolved.role,
-    };
+      private: isPrivate || undefined,
+    } as JobHandle;
 
     const managed: ManagedJob = {
       jobId,
@@ -249,6 +302,8 @@ export async function spawnJob(opts: {
       role: resolved.role,
       runId,
       outputPath,
+      outputBaselineBytes,
+      private: handle.private,
       owns: handle.owns,
       forbid: handle.forbid,
       watermark,
@@ -273,7 +328,12 @@ export async function spawnJob(opts: {
           outputBaselineBytes,
           signal: opts.parentSignal,
         });
-        const collected = await collectReply({ herdr, handle });
+        const collected = await collectReply({
+          herdr,
+          handle,
+          signal: opts.parentSignal,
+          sanitize: opts.sanitizeReply,
+        });
         appendJournal(runDir, {
           jobId,
           model: resolved.model,

@@ -40,6 +40,8 @@ export type HerdActionParams = {
   owns?: string;
   forbid?: string;
   waitForReply?: boolean;
+  /** Force local private worker (secret-dependent op). Requires private.enabled. */
+  private?: boolean;
   jobId?: string;
   all?: boolean;
   timeoutMs?: number;
@@ -53,6 +55,8 @@ export type HerdRuntime = {
   herdr: () => HerdrClient | null;
   monitor: HerdMonitor;
   modelProbe?: ModelProbeFn;
+  /** Redaction for cloud parents; set by index.ts. Identity when absent. */
+  sanitizeForCloud?: (text: string) => string;
 };
 
 export async function executeHerd(
@@ -160,6 +164,7 @@ export async function executeHerd(
       herdr,
       monitor: runtime.monitor,
       modelProbe: runtime.modelProbe,
+      sanitizeReply: runtime.sanitizeForCloud,
       parentSignal: signal,
     });
   }
@@ -238,6 +243,7 @@ export async function executeHerd(
       sessionFile: job.sessionFile,
       watermark: job.watermark ?? 0,
       outputPath: job.outputPath,
+      outputBaselineBytes: job.outputBaselineBytes,
       signal,
     });
     return {
@@ -263,14 +269,16 @@ export async function executeHerd(
       taskPreview: "",
       runId: job.runId ?? undefined,
       outputPath: job.outputPath,
+      outputBaselineBytes: job.outputBaselineBytes,
       owns: job.owns,
       forbid: job.forbid,
       model: job.model,
       thinking: job.thinking,
       local: job.local,
       role: job.role,
+      private: job.private,
     };
-    const collected = await collectReply({ herdr, handle, signal });
+    const collected = await collectReply({ herdr, handle, signal, sanitize: runtime.sanitizeForCloud });
     return {
       text: collected.reply,
       details: { action, jobId, source: collected.source },

@@ -5,6 +5,7 @@ import {
   resolveModel,
   resolveModelClaimingLocal,
   pickThinkEntry,
+  formatModelsList,
   THINK_PER_MODEL,
 } from "../src/resolve-model.ts";
 import { createLocalStreamLock } from "../src/local-lock.ts";
@@ -109,6 +110,22 @@ describe("resolveModel", () => {
     const r = resolveModel(config, { difficulty: "easy", localInUse: 0 });
     assert.equal(r.role, "do");
     assert.equal(r.local, true);
+  });
+});
+
+describe("formatModelsList", () => {
+  const cfg = parseHerdConfig(defaultConfigObject());
+
+  it("reports private off on defaults", () => {
+    assert.match(formatModelsList(cfg, 0), /^private: off$/m);
+  });
+
+  it("reports private on when enabled", () => {
+    const on = parseHerdConfig({
+      ...defaultConfigObject(),
+      private: { enabled: true },
+    });
+    assert.match(formatModelsList(on, 0), /^private: on$/m);
   });
 });
 
