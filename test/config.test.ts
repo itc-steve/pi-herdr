@@ -7,6 +7,49 @@ import {
 } from "../src/config.ts";
 
 describe("parseHerdConfig", () => {
+  it("parses do[] bucket; drops local model duplicate", () => {
+    const cfg = parseHerdConfig({
+      local: { model: "Vllm/X", thinking: "low" },
+      do: [
+        { model: "Vllm/X", thinking: "low" },
+        { model: "grok-cli/grok-4.6", thinking: "medium" },
+      ],
+    });
+    assert.deepEqual(
+      cfg.do.map((e) => e.model),
+      ["grok-cli/grok-4.6"],
+    );
+  });
+
+  it("do[] must be an array of entries", () => {
+    assert.throws(
+      () => parseHerdConfig({ do: "grok-cli/grok-4.6" }),
+      /\"do\" must be an array/,
+    );
+    assert.throws(
+      () => parseHerdConfig({ do: [{ model: "x" }] }),
+      /requires non-empty model and thinking/,
+    );
+  });
+
+  it("local disabled + do[] passes validation", () => {
+    const cfg = parseHerdConfig({
+      local: { enabled: false, model: "vllm/x", thinking: "low" },
+      do: [{ model: "grok-cli/grok-4.6", thinking: "medium" }],
+    });
+    assert.equal(cfg.do.length, 1);
+  });
+
+  it("local disabled + no think + no do[] fails validation", () => {
+    assert.throws(
+      () =>
+        parseHerdConfig({
+          local: { enabled: false, model: "vllm/x", thinking: "low" },
+        }),
+      /must enable local or define at least one think or do model/,
+    );
+  });
+
   it("parses default-local + think catalog", () => {
     const cfg = parseHerdConfig(defaultConfigObject());
     assert.equal(cfg.sessionPolicy, "per-job");

@@ -169,6 +169,15 @@ export async function spawnJob(opts: {
         maxModelConcurrent: config.maxModelConcurrent,
         claimThinkPick: (catalog, max, id) =>
           opts.monitor.claimThinkPick(catalog, max, id),
+        claimDoPick: (catalog, localModel, localInUse, localMax, localEnabled, id) =>
+          opts.monitor.claimDoPick(
+            catalog,
+            localModel,
+            localInUse,
+            localMax,
+            localEnabled,
+            id,
+          ),
       },
       localLock,
       opts.parentSignal,
@@ -213,9 +222,11 @@ export async function spawnJob(opts: {
       thinking: resolved.thinking,
       local: resolved.local,
       role: resolved.role,
-      slotMax: config.think.some((e) => e.model === resolved.model)
-        ? THINK_PER_MODEL
-        : undefined,
+      slotMax:
+        config.think.some((e) => e.model === resolved.model) ||
+        config.do.some((e) => e.model === resolved.model)
+          ? THINK_PER_MODEL
+          : undefined,
     });
     monitor.releaseThinkHold(jobId);
 

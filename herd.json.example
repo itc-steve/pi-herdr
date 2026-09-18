@@ -7,6 +7,9 @@
     "thinking": "medium",
     "preflight": true
   },
+  "do": [
+    { "model": "grok-cli/grok-build", "thinking": "medium" }
+  ],
   "think": [
     {
       "model": "grok-cli/grok-4.6",

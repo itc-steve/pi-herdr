@@ -2,7 +2,7 @@
 
 export type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
-/** do = local implementer (default). think = ranked frontier catalog. */
+/** do = local implementer (default) + optional do[] extras. think = ranked frontier catalog. */
 export type Role = "do" | "think";
 
 export type IsolationMode = "none" | "worktree";
@@ -45,6 +45,8 @@ export interface HerdConfig {
   sessionPolicy: SessionPolicy;
   maxModelConcurrent: number; // local seats AND per exact provider/model string
   local: LocalConfig;
+  /** Extra non-local do models. Bare role=do prefers local; extras only when local seats are full. */
+  do: CatalogEntry[];
   /** Ordered frontier rank. Index 0 = best. */
   think: CatalogEntry[];
   private: PrivateConfig;

@@ -199,12 +199,16 @@ export function parseHerdConfig(raw: unknown): HerdConfig {
   }
 
   const local = normalizeLocal(obj.local);
+  /** Local model is the implicit do head — drop duplicates from do[]. */
+  const doModels = normalizeBucket(obj.do, "do").filter(
+    (e) => !(local.enabled && e.model === local.model),
+  );
   const think = foldThink(obj, local.model);
   const privateConfig = normalizePrivate(obj.private);
 
-  if (!local.enabled && think.length === 0) {
+  if (!local.enabled && think.length === 0 && doModels.length === 0) {
     throw new Error(
-      "herd.json must enable local or define at least one think model",
+      "herd.json must enable local or define at least one think or do model",
     );
   }
 
@@ -213,6 +217,7 @@ export function parseHerdConfig(raw: unknown): HerdConfig {
     sessionPolicy: "per-job",
     maxModelConcurrent,
     local,
+    do: doModels,
     think,
     private: privateConfig,
     defaults: normalizeDefaults(obj.defaults),

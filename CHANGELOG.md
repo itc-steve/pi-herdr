@@ -2,6 +2,12 @@
 
 All notable changes to `@itc-steve/pi-herdr` are documented here.
 
+## [1.5.1] — 2026-09-18
+
+### Added
+
+- Opt-in `do[]` catalog in herd.json: extra non-local models a bare `role=do` rotates onto when local seats are full (local model stays the do head; each `do[]` model caps at one in-flight job, shared with `think[]`). Empty/absent `do[]` keeps the classic local-only do behavior. `herd models` lists the do extras.
+
 ## [1.5.0] — 2026-09-16
 
 ### Added

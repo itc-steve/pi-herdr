@@ -50,6 +50,9 @@ Copy [herd.json.example](./herd.json.example) to `~/.pi/agent/herd.json` (create
     "thinking": "medium",
     "preflight": true
   },
+  "do": [
+    { "model": "grok-cli/grok-build", "thinking": "medium" }
+  ],
   "think": [
     { "model": "grok-cli/grok-4.6", "thinking": "high" },
     { "model": "openai-codex/gpt-5.6-sol", "thinking": "high" }
@@ -68,6 +71,8 @@ Copy [herd.json.example](./herd.json.example) to `~/.pi/agent/herd.json` (create
 
 `think[]` order **is** the rank. Put the best frontier first.
 
+`do[]` is optional: extra non-local models a bare `role=do` may rotate onto when local seats are full. The local model stays the do head; each `do[]` model caps at one in-flight job (same as think — it shares the per-model cap, so a `think` job and a `do` job on the same model never overlap).
+
 Old `easy` / `medium` / `hard` catalogs still parse: remotes fold into `think` (hard, then medium, then easy). `local.maxStreams`, `preferOn`, and `whenFull` are ignored. Cap is always `maxModelConcurrent`.
 
 ### Field reference
@@ -77,6 +82,7 @@ Old `easy` / `medium` / `hard` catalogs still parse: remotes fold into `think` (
 | `sessionDir` | Run root (`runs/`, journals, session JSONL) |
 | `maxModelConcurrent` | Cap on **local seats** and on in-flight jobs **per exact provider/model** |
 | `local` | Default implementer: model id, thinking, optional preflight |
+| `do` | Optional extra non-local do models. Bare `role=do` always takes a local seat while one is free; only when local seats are full does it pick a free `do[]` model (no think-style round-robin past a free local seat) |
 | `think` | Ordered frontier catalog for `role=think` |
 | `private.enabled` | Opt-in cloud redaction + `private=true` spawn (default **false**) |
 | `defaults.isolation` | ignored; writers share the tree (`owns=` is the isolation) |
@@ -92,7 +98,7 @@ Jobs resolved to the local model are tagged `local: true` so parent, kick text, 
 
 | Spawn | Route |
 | ----- | ----- |
-| no `role`, or `role=do` | Local. Queue if seats full. Never overflow onto think. |
+| no `role`, or `role=do` | Local. With `do[]`: local seats full → rotate onto a free `do[]` model (1 at a time). All full → queue a local seat. Never overflow onto think. |
 | `role=think` (aliases: `review`, `plan`, `architect`, `verify`) | One in-flight per think model. First → `think[0]`. Second task or second opinion → the other. Both busy → queue `think[0]` |
 | `model=` | That model (local id still takes a local seat) |
 
@@ -103,7 +109,7 @@ One-release shim: `difficulty=easy\|medium` → do, `difficulty=hard` → think.
 ### Local seat
 
 1. Default spawn claims a local seat (cap = `maxModelConcurrent`).
-2. Extra do jobs **wait** for a free seat.
+2. With `do[]`: extra do jobs rotate onto a free `do[]` model once local seats are full. Without `do[]`: extra do jobs **wait** for a free seat. Never overflow onto think.
 3. Each job gets a **fresh** `sessions/<job>.jsonl`.
 4. Kick banner: *You are a LOCAL worker. One slice…*
 

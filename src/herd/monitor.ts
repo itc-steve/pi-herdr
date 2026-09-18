@@ -4,7 +4,7 @@
  */
 
 import type { CatalogEntry } from "../types.ts";
-import { pickThinkEntry, THINK_PER_MODEL } from "../resolve-model.ts";
+import { pickDoEntry, pickThinkEntry, THINK_PER_MODEL } from "../resolve-model.ts";
 import type { HerdrClient } from "../herdr/client.ts";
 import {
   assertLaneAvailable,
@@ -144,6 +144,9 @@ export function createHerdMonitor(opts: {
   const thinkHolds = new Map<string, string>();
   /** Next think[] index (second opinion / second think task → the other model). */
   let thinkCursor = 0;
+  /** Next do-pool extra index — advances only on extra picks; local head is
+   *  always preferred while seats remain (separate from thinkCursor). */
+  let doCursor = 0;
   /** ticketId → per-model cap used to grant that slot (think=1, else maxModelConcurrent). */
   const slotCap = new Map<string, number>();
 
@@ -177,6 +180,32 @@ export function createHerdMonitor(opts: {
 
   function releaseThinkHold(jobId: string) {
     thinkHolds.delete(jobId);
+  }
+
+  function claimDoPick(
+    catalog: CatalogEntry[],
+    localModel: string,
+    localInUse: number,
+    localMax: number,
+    localEnabled: boolean,
+    jobId: string,
+  ): { entry: CatalogEntry; queued: boolean } {
+    const existing = thinkHolds.get(jobId);
+    if (existing) {
+      const entry =
+        catalog.find((e) => e.model === existing) ?? catalog[0]!;
+      return { entry, queued: false };
+    }
+    const picked = pickDoEntry(
+      catalog,
+      { localModel, localInUse, localMax, localEnabled, load: thinkLoad },
+      doCursor,
+    );
+    if (!picked.queued) {
+      thinkHolds.set(jobId, picked.entry.model);
+      doCursor = picked.nextStart;
+    }
+    return picked;
   }
 
   function tryGrantSlot(ticketId: string, model: string, max?: number): boolean {
@@ -502,6 +531,7 @@ export function createHerdMonitor(opts: {
     modelInUse,
     thinkLoad,
     claimThinkPick,
+    claimDoPick,
     releaseThinkHold,
   };
 }

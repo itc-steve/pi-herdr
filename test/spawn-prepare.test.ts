@@ -18,6 +18,7 @@ import {
 import { spawnJob, type SpawnParams } from "../src/herd/spawn.ts";
 import { buildHandoffKick } from "../src/handoff.ts";
 import { parseHerdConfig, defaultConfigObject } from "../src/config.ts";
+import { pickDoEntry } from "../src/resolve-model.ts";
 import { createLocalStreamLock } from "../src/local-lock.ts";
 import { createHerdState } from "../src/state.ts";
 import { createRun } from "../src/runs.ts";
@@ -222,6 +223,7 @@ describe("private spawn contract", () => {
     state: ReturnType<typeof createHerdState>;
     createTabCalls: () => number;
     bootedCmds: () => string[];
+    slotLanes: () => Array<Record<string, unknown>>;
   };
 
   function spawnHarness(privateEnabled: boolean): Harness {
@@ -246,6 +248,7 @@ describe("private spawn contract", () => {
     let status: "idle" | "working" = "idle";
     let createTabCalls = 0;
     const booted: string[] = [];
+    const slotLanes: Array<Record<string, unknown>> = [];
     const herdr = {
       getCurrentPaneInfo: async () =>
         ({ ...pane, pane_id: "w1:p1", tab_id: "w1:t1" }),
@@ -264,13 +267,31 @@ describe("private spawn contract", () => {
     } as unknown as HerdrClient;
     const monitor = {
       inFlightLaneClaims: () => [],
-      reserveSlot: async () => "slot-1",
+      reserveSlot: async (_signal?: unknown, lane?: Record<string, unknown>) => {
+        slotLanes.push(lane ?? {});
+        return "slot-1";
+      },
       modelInUse: () => 0,
       thinkLoad: () => 0,
       claimThinkPick: (catalog: { model: string; thinking: string }[]) => ({
         entry: catalog[0]!,
         queued: false,
       }),
+      claimDoPick: (
+        catalog: { model: string; thinking: string }[],
+        localModel: string,
+        localInUse: number,
+        localMax: number,
+        localEnabled: boolean,
+        _jobId: string,
+      ) =>
+        pickDoEntry(catalog, {
+          localModel,
+          localInUse,
+          localMax,
+          localEnabled,
+          load: () => 0,
+        }),
       releaseThinkHold: () => {},
       attachAndWatch: () => ({}),
       releaseTicket: () => {},
@@ -283,6 +304,7 @@ describe("private spawn contract", () => {
       state: createHerdState(),
       createTabCalls: () => createTabCalls,
       bootedCmds: () => booted,
+      slotLanes: () => slotLanes,
     };
   }
 
@@ -430,5 +452,21 @@ describe("private spawn contract", () => {
       h.bootedCmds().some((c) => c.startsWith("env PI_HERD_PRIVATE=1 pi --model")),
     );
     assert.equal((res.handle as { private?: boolean } | undefined)?.private, true);
+  });
+
+  it("do[] extra spawn reserves its slot with the shared per-model cap (slotMax=1)", async () => {
+    const h = spawnHarness(false);
+    h.config.do = [{ model: "grok-cli/grok-build", thinking: "medium" }];
+    h.config.maxModelConcurrent = 1; // single local seat taken → extra
+    h.localLock.tryAcquire("j00");
+    try {
+      await spawnJob(spawnOpts(h, { task: "t", output: "o.md" }));
+    } finally {
+      h.localLock.release("j00");
+    }
+    assert.equal(h.createTabCalls(), 1);
+    const lane = h.slotLanes()[0]!;
+    assert.equal(lane.model, "grok-cli/grok-build");
+    assert.equal(lane.slotMax, 1);
   });
 });

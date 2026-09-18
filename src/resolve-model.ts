@@ -20,6 +20,15 @@ export type ResolveModelOpts = {
     max: number,
     jobId: string,
   ) => { entry: CatalogEntry; queued: boolean };
+  /** Atomic do-pool pick (parallel spawns). */
+  claimDoPick?: (
+    catalog: CatalogEntry[],
+    localModel: string,
+    localInUse: number,
+    localMax: number,
+    localEnabled: boolean,
+    jobId: string,
+  ) => { entry: CatalogEntry; queued: boolean };
 };
 
 function isLocalModel(config: HerdConfig, model: string): boolean {
@@ -104,6 +113,94 @@ function pickThink(
   return thinkResolved(picked.entry, thinking, picked.queued, extraReason);
 }
 
+/** do pool = local model (head, when enabled) + extra do[] models. */
+export function doCatalog(config: HerdConfig): CatalogEntry[] {
+  const pool: CatalogEntry[] = [];
+  if (config.local.enabled) {
+    pool.push({ model: config.local.model, thinking: config.local.thinking });
+  }
+  for (const e of config.do) pool.push(e);
+  return pool;
+}
+
+export type DoPickCaps = {
+  localModel: string;
+  localInUse: number;
+  localMax: number;
+  /** Local seat accounting only applies when local is actually enabled. */
+  localEnabled: boolean;
+  load: (model: string) => number;
+};
+
+/**
+ * Local-first do pool pick. While a local seat remains (local enabled and
+ * localInUse < localMax) the local head is always taken, no matter where the
+ * cursor points. Only when local is at cap (or disabled) does the cursor
+ * rotate through the entries; extras cap at THINK_PER_MODEL (shared with
+ * think, never double a cloud subscription). All at cap with local enabled →
+ * queue a local seat; otherwise queue the origin entry.
+ */
+export function pickDoEntry(
+  catalog: CatalogEntry[],
+  caps: DoPickCaps,
+  startIndex = 0,
+): { entry: CatalogEntry; queued: boolean; nextStart: number } {
+  if (catalog.length === 0) {
+    throw new Error(
+      "No do models available. Enable local or add do[] in ~/.pi/agent/herd.json.",
+    );
+  }
+  const atCap = (m: string) =>
+    caps.localEnabled && m === caps.localModel
+      ? caps.localInUse >= caps.localMax
+      : caps.load(m) >= THINK_PER_MODEL;
+
+  // Local-first: a free local seat beats any free extra (cursor ignored).
+  if (
+    caps.localEnabled &&
+    catalog[0]!.model === caps.localModel &&
+    caps.localInUse < caps.localMax
+  ) {
+    return { entry: catalog[0]!, queued: false, nextStart: startIndex };
+  }
+
+  // Local at cap (or disabled): rotate from the cursor; the local entry is
+  // skipped via atCap when it is at cap.
+  const n = catalog.length;
+  const origin = ((startIndex % n) + n) % n;
+  for (let i = 0; i < n; i++) {
+    const idx = (origin + i) % n;
+    const e = catalog[idx]!;
+    if (!atCap(e.model)) {
+      return { entry: e, queued: false, nextStart: (idx + 1) % n };
+    }
+  }
+  // All at cap: queue a local seat (never a cloud extra — the job would wait
+  // on the wrong queue even after a local seat frees). Else queue the origin.
+  if (caps.localEnabled) {
+    return { entry: catalog[0]!, queued: true, nextStart: startIndex };
+  }
+  return { entry: catalog[origin]!, queued: true, nextStart: origin };
+}
+
+function doResolved(
+  entry: CatalogEntry,
+  thinking: string | undefined,
+  queued: boolean,
+  extraReason?: string,
+): ResolvedModel {
+  const reason = queued
+    ? `do pool full → queue ${entry.model}`
+    : `do ${entry.model}`;
+  return {
+    model: entry.model,
+    thinking: thinking?.trim() || entry.thinking,
+    local: false,
+    role: "do",
+    reason: extraReason ? `${extraReason}; ${reason}` : reason,
+  };
+}
+
 /**
  * Snapshot resolve (no lock). Local-full + exact local model throws.
  * Parallel spawns must call {@link resolveModelClaimingLocal}.
@@ -124,9 +221,12 @@ export function resolveModel(
     const model = opts.model.trim();
     const local = isLocalModel(config, model);
     const fromThink = config.think.find((e) => e.model === model);
+    const fromDo = config.do.find((e) => e.model === model);
     const thinking =
       opts.thinking?.trim() ||
-      (local ? config.local.thinking : fromThink?.thinking) ||
+      (local
+        ? config.local.thinking
+        : fromThink?.thinking ?? fromDo?.thinking) ||
       "medium";
     if (local && localInUse >= max) {
       throw new Error(
@@ -146,22 +246,43 @@ export function resolveModel(
   }
 
   if (role === "do") {
-    if (!config.local.enabled) {
-      throw new Error(
-        "Local is disabled. Pass role=think or enable local in ~/.pi/agent/herd.json.",
+    if (config.do.length === 0) {
+      if (!config.local.enabled) {
+        throw new Error(
+          "Local is disabled. Pass role=think or enable local in ~/.pi/agent/herd.json.",
+        );
+      }
+      if (localInUse >= max) {
+        throw new Error(
+          `Local streams full (${localInUse}/${max}). Spawn queues a seat; ` +
+            `do not overflow onto think.`,
+        );
+      }
+      return localResolved(
+        config,
+        opts.thinking,
+        `${shimNote}role=do local (streams ${localInUse}/${max})`,
       );
     }
-    if (localInUse >= max) {
-      throw new Error(
-        `Local streams full (${localInUse}/${max}). Spawn queues a seat; ` +
-          `do not overflow onto think.`,
+    const picked = pickDoEntry(doCatalog(config), {
+      localModel: config.local.model,
+      localInUse,
+      localMax: max,
+      localEnabled: config.local.enabled,
+      load: opts.modelInUse ?? (() => 0),
+    });
+    if (picked.entry.model === config.local.model && config.local.enabled) {
+      return localResolved(
+        config,
+        opts.thinking,
+        `${shimNote}${
+          picked.queued
+            ? "do pool full → queue local"
+            : `do ${picked.entry.model}`
+        } (streams ${localInUse}/${max})`,
       );
     }
-    return localResolved(
-      config,
-      opts.thinking,
-      `${shimNote}role=do local (streams ${localInUse}/${max})`,
-    );
+    return doResolved(picked.entry, opts.thinking, picked.queued, shim);
   }
 
   return pickThink(config, opts.thinking, opts.modelInUse, max, shim);
@@ -196,7 +317,8 @@ async function claimLocalSeat(
 /**
  * Resolve a model and atomically claim a local stream when needed.
  *
- * do → always local, queue if full (never overflow onto think).
+ * do → local head; overflow to do[] extras when local seats are full; queue a
+ *      local seat when everything is full (never onto think[]).
  * think → one per catalog model; rotate so a second think is the other model.
  */
 export async function resolveModelClaimingLocal(
@@ -258,15 +380,56 @@ export async function resolveModelClaimingLocal(
     return { resolved, localHeld: false };
   }
 
-  return claimLocalSeat(
-    config,
-    opts.jobId,
-    opts.thinking,
-    localLock,
-    signal,
-    `${shimNote}role=do local`,
-  );
-}
+  // role === "do" (think returned above).
+  if (config.do.length === 0) {
+      return claimLocalSeat(
+        config,
+        opts.jobId,
+        opts.thinking,
+        localLock,
+        signal,
+        `${shimNote}role=do local`,
+      );
+    }
+    const pool = doCatalog(config);
+    const picked = opts.claimDoPick
+      ? opts.claimDoPick(
+          pool,
+          config.local.model,
+          localLock.inUse(),
+          max,
+          config.local.enabled,
+          opts.jobId,
+        )
+      : pickDoEntry(pool, {
+          localModel: config.local.model,
+          localInUse: localLock.inUse(),
+          localMax: max,
+          localEnabled: config.local.enabled,
+          load: opts.modelInUse ?? (() => 0),
+        });
+    // Queued + local enabled always means pickDoEntry returned the local entry
+    // (all pools at cap) → take the local seat queue, never a cloud extra.
+    const isLocalPick =
+      config.local.enabled &&
+      (picked.entry.model === config.local.model || picked.queued);
+    if (isLocalPick) {
+      return claimLocalSeat(
+        config,
+        opts.jobId,
+        opts.thinking,
+        localLock,
+        signal,
+        `${shimNote}${
+          picked.queued ? "do pool full → queue local" : "do pool local"
+        }`,
+      );
+    }
+    return {
+      resolved: doResolved(picked.entry, opts.thinking, picked.queued, shim),
+      localHeld: false,
+    };
+  }
 
 export function formatModelsList(
   config: HerdConfig,
@@ -284,9 +447,14 @@ export function formatModelsList(
     `resultDelivery: ${config.defaults.resultDelivery} ` +
       `triggerTurnOnResult: ${config.defaults.triggerTurnOnResult}`,
     `private: ${config.private.enabled ? "on" : "off"}`,
-    "",
-    "think (1 at a time per model; next think rotates):",
   ];
+  if (config.do.length) {
+    lines.push(
+      "", "do extras (1 at a time per model; bare role=do prefers local and takes these only when local seats are full):",
+    );
+    for (const e of config.do) lines.push(`  ${e.model}:${e.thinking}`);
+  }
+  lines.push("", "think (1 at a time per model; next think rotates):");
   if (!config.think.length) {
     lines.push("  (empty)");
   } else {
