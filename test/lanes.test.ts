@@ -14,6 +14,8 @@ describe("lanes", () => {
     assert.equal(normalizeLanePath("./src/a"), "src/a");
     assert.throws(() => normalizeLanePath("../x"), LaneError);
     assert.throws(() => normalizeLanePath("/abs"), LaneError);
+    assert.throws(() => normalizeLanePath("src/**"), /not a glob/);
+    assert.equal(normalizeLanePath("src/[id]/page.ts"), "src/[id]/page.ts");
   });
 
   it("detects overlaps", () => {

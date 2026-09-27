@@ -4,6 +4,7 @@ import {
   createAndBootJob,
   scrollbackLooksLikeShellPrompt,
   isOutputReady,
+  shortTabLabel,
   taskPreview,
 } from "../src/herd/boot.ts";
 import type { HerdrClient } from "../src/herdr/client.ts";
@@ -45,6 +46,14 @@ describe("boot helpers", () => {
 
   it("taskPreview truncates", () => {
     assert.ok(taskPreview("a".repeat(200)).endsWith("…"));
+  });
+
+  it("shortTabLabel keeps two words", () => {
+    assert.equal(shortTabLabel("Adapter readiness retry"), "Adapter readiness");
+    assert.equal(shortTabLabel("  Fix   pinned-tab review findings " ), "Fix pinned-tab");
+    assert.equal(shortTabLabel("codex"), "codex");
+    assert.equal(shortTabLabel(""), "job");
+    assert.equal(shortTabLabel("   ", "local"), "local");
   });
 
   it("creates jobs as tabs in the current workspace", async () => {
@@ -89,6 +98,44 @@ describe("boot helpers", () => {
     assert.equal(createdWorkspace, false);
     assert.deepEqual(result, { paneId: "w1:p2", workspaceId: "w1" });
   });
+
+  it("does not reuse a tab that already has the same two-word label", async () => {
+    let created = 0;
+    const pane = {
+      pane_id: "w1:p3",
+      workspace_id: "w1",
+      tab_id: "w1:t3",
+      focused: false,
+      agent: "pi",
+      agent_status: "idle" as const,
+      revision: 1,
+    };
+    const herdr = {
+      getCurrentPaneInfo: async () => ({ ...pane, pane_id: "w1:p1", tab_id: "w1:t1" }),
+      getTabList: async () => [{ tab_id: "w1:t2", workspace_id: "w1", label: "Adapter readiness" }],
+      getPaneList: async () => {
+        throw new Error("must not hijack an existing same-label tab");
+      },
+      createTab: async () => {
+        created += 1;
+        return { tab: { tab_id: pane.tab_id, workspace_id: "w1" }, paneId: pane.pane_id };
+      },
+      renamePane: async () => {},
+      readPane: async () => "$ ",
+      runInPane: async () => {},
+      getPaneInfo: async () => pane,
+    } as unknown as HerdrClient;
+
+    await createAndBootJob({
+      herdr,
+      label: "Adapter readiness",
+      cwd: "/repo",
+      bootCmd: "pi",
+      sessionFile: "/tmp/job-02.jsonl",
+      timeoutMs: 5_000,
+    });
+    assert.equal(created, 1);
+  });
 });
 
 describe("spawn lifecycle", () => {
@@ -97,6 +144,7 @@ describe("spawn lifecycle", () => {
     const defaults = defaultConfigObject();
     const config = parseHerdConfig({
       ...defaults,
+      workers: undefined, // legacy low-level spawn coverage
       sessionDir,
       local: { ...(defaults.local as object), preflight: false },
     });
@@ -119,7 +167,7 @@ describe("spawn lifecycle", () => {
       renamePane: async () => {},
       readPane: async () => "$ ",
       runInPane: async (_paneId: string, command: string) => {
-        if (!command.startsWith("pi ")) status = "working";
+        if (!command.includes("pi --model")) status = "working";
       },
       getPaneInfo: async () => ({ ...pane, agent_status: status }),
     } as unknown as HerdrClient;
@@ -231,6 +279,7 @@ describe("private spawn contract", () => {
     const defaults = defaultConfigObject();
     const config = parseHerdConfig({
       ...defaults,
+      workers: undefined, // legacy low-level spawn coverage
       sessionDir,
       private: { enabled: privateEnabled },
       local: { ...(defaults.local as object), preflight: false },

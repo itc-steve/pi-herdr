@@ -1,11 +1,13 @@
 import type { ManagedJob } from "./types.ts";
 import type { LaneClaim } from "./lanes.ts";
+import type { Mailbox } from "./herd/mailbox.ts";
 
 export type HerdState = {
   jobs: Record<string, ManagedJob>;
   order: string[];
   activeMonitors: Set<string>;
   namedOutputs: Record<string, string>;
+  mailboxes: Map<string, Mailbox>;
   previous?: string;
 };
 
@@ -15,6 +17,7 @@ export function createHerdState(): HerdState {
     order: [],
     activeMonitors: new Set(),
     namedOutputs: {},
+    mailboxes: new Map(),
   };
 }
 
@@ -26,6 +29,12 @@ export function inFlightLaneClaims(state: HerdState): LaneClaim[] {
     out.push({ key: jobId, owns: job.owns });
   }
   return out;
+}
+
+export function formatHerdFooter(state: HerdState): string {
+  const running = state.activeMonitors.size;
+  const done = Math.max(0, state.order.length - running);
+  return `herd ● ${running} ✓ ${done}`;
 }
 
 export function formatStatus(

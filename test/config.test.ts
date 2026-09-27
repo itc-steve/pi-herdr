@@ -50,13 +50,13 @@ describe("parseHerdConfig", () => {
     );
   });
 
-  it("parses default-local + think catalog", () => {
+  it("parses named worker defaults", () => {
     const cfg = parseHerdConfig(defaultConfigObject());
     assert.equal(cfg.sessionPolicy, "per-job");
     assert.equal(cfg.maxModelConcurrent, 2);
     assert.equal(cfg.local.enabled, true);
-    assert.ok(cfg.think.length >= 1);
-    assert.equal(cfg.think[0]!.model, "grok-cli/grok-4.6");
+    assert.equal(cfg.workers.grok!.model, "grok-cli/grok-4.6");
+    assert.equal(cfg.workers.local!.maxConcurrent, 2);
     assert.equal(cfg.defaults.requireOutput, true);
     assert.equal(cfg.defaults.resultDelivery, "pointer");
     assert.equal(cfg.defaults.triggerTurnOnResult, true);

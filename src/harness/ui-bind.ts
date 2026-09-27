@@ -1,27 +1,18 @@
-/**
- * Bind footer status + below-editor widget to a live ExtensionContext.
- *
- * Patterns from:
- * - pi-dynamic-workflows display.ts (hasUI guards, re-set widget to refresh)
- * - pi-task widget.ts (string[] widgets + setStatus chip)
- *
- * Never call UI APIs at module load — only after session_start binds a ctx.
- */
+/** Bind a one-line below-editor chip to a live ExtensionContext. */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export type UiHandle = Pick<ExtensionContext, "ui" | "hasUI">;
 
 const STATUS_KEY = "herd";
-const WIDGET_KEY = "herd-tasks";
+const WIDGET_KEY = "herd";
+const LEGACY_WIDGET_KEY = "herd-tasks";
 
 export type HerdUiBinder = {
   /** Capture live UI from session_start / tool / command. */
   bind(ctx: UiHandle): void;
-  /** Footer chip. Pass undefined when not in Herdr / nothing to show policy. */
+  /** Compact chip above the Pi footer. Pass undefined to hide. */
   setStatus(text: string | undefined): void;
-  /** Multi-line panel below the editor. Empty clears. */
-  setWidgetLines(lines: string[]): void;
   notify(message: string, type?: "info" | "warning" | "error"): void;
   clear(): void;
   /** Last bound ctx, if any. */
@@ -35,34 +26,30 @@ export function createHerdUiBinder(): HerdUiBinder {
     return Boolean(boundCtx?.hasUI && boundCtx.ui);
   }
 
+  function paint(text: string | undefined) {
+    if (!canUi()) return;
+    try {
+      const ui = boundCtx!.ui;
+      // undefined deletes the key. "" stays in the map and becomes a blank footer line.
+      ui.setStatus(STATUS_KEY, undefined);
+      ui.setWidget(LEGACY_WIDGET_KEY, undefined);
+      if (!text) {
+        ui.setWidget(WIDGET_KEY, undefined);
+        return;
+      }
+      ui.setWidget(WIDGET_KEY, [text], { placement: "belowEditor" });
+    } catch {
+      /* stale ui after reload */
+    }
+  }
+
   return {
     bind(ctx) {
       boundCtx = ctx;
     },
     bound: () => boundCtx,
     setStatus(text) {
-      if (!canUi()) return;
-      try {
-        // Empty string clears the chip (Pi TUI); undefined can leave a stale label.
-        boundCtx!.ui.setStatus(STATUS_KEY, text ?? "");
-      } catch {
-        /* stale ui after reload */
-      }
-    },
-    setWidgetLines(lines) {
-      if (!canUi()) return;
-      try {
-        if (!lines.length) {
-          boundCtx!.ui.setWidget(WIDGET_KEY, undefined);
-          return;
-        }
-        // Re-set the same key to force a re-render (dynamic-workflows pattern).
-        boundCtx!.ui.setWidget(WIDGET_KEY, lines, {
-          placement: "belowEditor",
-        });
-      } catch {
-        /* ignore */
-      }
+      paint(text?.trim() ? text : undefined);
     },
     notify(message, type = "info") {
       if (!canUi()) return;
@@ -73,13 +60,7 @@ export function createHerdUiBinder(): HerdUiBinder {
       }
     },
     clear() {
-      if (!canUi()) return;
-      try {
-        boundCtx!.ui.setStatus(STATUS_KEY, "");
-        boundCtx!.ui.setWidget(WIDGET_KEY, undefined);
-      } catch {
-        /* ignore */
-      }
+      paint(undefined);
     },
   };
 }

@@ -2,7 +2,9 @@
  * Full herd spawn: prepare → create/boot pane → submit ACK → monitor or wait.
  */
 
+import { fileURLToPath } from "node:url";
 import type { HerdConfig, ManagedJob } from "../types.ts";
+import type { Mailbox } from "./mailbox.ts";
 import {
   resolveModelClaimingLocal,
   THINK_PER_MODEL,
@@ -34,20 +36,27 @@ import {
   DEFAULT_DISPATCH_TIMEOUT_MS,
   formatHerdResultMessage,
   outputFileBytes,
+  shortTabLabel,
   submitTaskToPane,
   taskPreview,
   waitForJobIdle,
   type JobHandle,
+  stopAgentInPane,
 } from "./boot.ts";
 import type { HerdMonitor } from "./monitor.ts";
 import { countSessionEntries } from "../readback.ts";
-import { bootCommand, resolveRole } from "../config.ts";
+import { bootCommand, resolveRole, shellQuote } from "../config.ts";
 import { hasPrivateMarker } from "../private.ts";
+import { JobCleanupError } from "./queue.ts";
 
 export class SpawnError extends Error {}
 
 export type SpawnParams = {
   task: string;
+  worker?: string;
+  after?: string;
+  /** New named-worker path: no owns means report-only. */
+  readOnly?: boolean;
   role?: string;
   difficulty?: string;
   model?: string;
@@ -80,6 +89,10 @@ export async function spawnJob(opts: {
   monitor: HerdMonitor;
   modelProbe?: ModelProbeFn;
   parentSignal?: AbortSignal;
+  /** Queue allocates identity before capacity is available. */
+  prepared?: { jobId: string; runId: string; runDir: string };
+  slotMax?: number;
+  mailbox?: Mailbox;
   /** Idempotent redaction hook for collected replies (private spawn). */
   sanitizeReply?: (text: string) => string;
 }): Promise<SpawnResult> {
@@ -89,8 +102,8 @@ export async function spawnJob(opts: {
 
   // Private contract — reject BEFORE any seat claim / reserveSlot / boot.
   // Prompt instructions are not a security boundary: private workers cannot fan out.
-  if (process.env.PI_HERD_PRIVATE === "1") {
-    throw new SpawnError("private workers cannot spawn further jobs.");
+  if (process.env.PI_HERD_PRIVATE === "1" || process.env.PI_HERD_WORKER === "1") {
+    throw new SpawnError("workers cannot spawn further jobs.");
   }
   const isPrivate = params.private === true;
   if (isPrivate) {
@@ -148,12 +161,13 @@ export async function spawnJob(opts: {
   let localHeld = false;
   let jobId = "";
   let ticketId = "";
+  let startedPane = "";
 
   try {
     // Job id first so the local-seat claim has a stable holder key before any async work.
-    const { runId, runDir } = requireActiveOrRef(config.sessionDir, params.run);
-    jobId = nextJobId(runDir);
-    const label = params.label?.trim() || jobId;
+    const { runId, runDir } = opts.prepared ?? requireActiveOrRef(config.sessionDir, params.run);
+    jobId = opts.prepared?.jobId ?? nextJobId(runDir);
+    const label = shortTabLabel(params.label || task);
     const sessionFile = ensureJobSessionFile(runDir, jobId);
 
     // Resolve role (default do) and claim a local seat when needed.
@@ -201,32 +215,28 @@ export async function spawnJob(opts: {
       outputBaselineBytes = outputFileBytes(outputPath);
     }
 
-    assertMultiWriterOwns({
-      owns,
-      inFlight: monitor.inFlightLaneClaims(jobId),
-    });
-    assertLaneAvailable({
-      key: jobId,
-      owns,
-      forbid,
-      inFlight: monitor.inFlightLaneClaims(jobId),
-    });
+    if (!opts.prepared) {
+      assertMultiWriterOwns({ owns, inFlight: monitor.inFlightLaneClaims(jobId) });
+      assertLaneAvailable({ key: jobId, owns, forbid, inFlight: monitor.inFlightLaneClaims(jobId) });
+    }
 
     // Per-model seat keyed by exact provider/model (e.g. grok-cli/grok-4.5).
     ticketId = await monitor.reserveSlot(opts.parentSignal, {
       model: resolved.model,
       jobId,
-      owns,
+      // Named jobs already hold cwd-aware lanes in the queue; do not re-check
+      // relative paths across unrelated projects in the legacy monitor.
+      owns: opts.prepared ? undefined : owns,
       forbid,
       brief,
       thinking: resolved.thinking,
       local: resolved.local,
       role: resolved.role,
-      slotMax:
+      slotMax: opts.slotMax ?? (
         config.think.some((e) => e.model === resolved.model) ||
         config.do.some((e) => e.model === resolved.model)
           ? THINK_PER_MODEL
-          : undefined,
+          : undefined),
     });
     monitor.releaseThinkHold(jobId);
 
@@ -244,17 +254,19 @@ export async function spawnJob(opts: {
       role: resolved.role,
       local: resolved.local,
       private: isPrivate || undefined,
+      readOnly: params.readOnly,
+      messaging: !!opts.mailbox && !isPrivate,
     });
 
-    const baseBootCmd = bootCommand(
-      resolved.model,
-      resolved.thinking,
-      sessionFile,
-    );
-    // Nested-spawn marker inherited by the child process.
+    let baseBootCmd = bootCommand(resolved.model, resolved.thinking, sessionFile);
+    // Explicit loading also supports parents started with pi -e rather than a global install.
+    const mailbox = isPrivate ? undefined : opts.mailbox;
+    if (mailbox) baseBootCmd += ` --extension ${shellQuote(fileURLToPath(new URL("../../index.ts", import.meta.url)))}`;
+    const mailEnv = mailbox ? `PI_HERD_MAILBOX=${shellQuote(mailbox.dir)} PI_HERD_JOB=${shellQuote(jobId)} ` : "";
+    // Nested-spawn marker inherited by the child process. Private jobs get no mailbox identity.
     const bootCmd = isPrivate
       ? `env PI_HERD_PRIVATE=1 ${baseBootCmd}`
-      : baseBootCmd;
+      : `env PI_HERD_WORKER=1 ${mailEnv}${baseBootCmd}`;
     const cwd = params.cwd?.trim() || process.cwd();
     const bootTimeout = Math.min(
       params.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS,
@@ -269,8 +281,14 @@ export async function spawnJob(opts: {
       sessionFile,
       timeoutMs: bootTimeout,
       signal: opts.parentSignal,
+      onPaneCreated: (id, workspace) => {
+        startedPane = id;
+        const queued = state.jobs[jobId];
+        if (queued) { queued.paneId = id; queued.workspaceId = workspace; }
+      },
     });
 
+    startedPane = paneId;
     const watermark = countSessionEntries(sessionFile);
     const { nudgedEnter } = await submitTaskToPane({
       herdr,
@@ -321,13 +339,12 @@ export async function spawnJob(opts: {
       launchedAt: Date.now(),
     };
     state.jobs[jobId] = managed;
-    state.order.push(jobId);
+    if (!state.order.includes(jobId)) state.order.push(jobId);
     state.activeMonitors.add(jobId);
 
     const timeoutMs = params.timeoutMs ?? config.defaults.timeoutMs;
 
     if (waitForReply) {
-      try {
         await waitForJobIdle({
           herdr,
           paneId,
@@ -337,6 +354,7 @@ export async function spawnJob(opts: {
           watermark,
           outputPath,
           outputBaselineBytes,
+          mailboxFinished: mailbox ? () => mailbox.isFinished(jobId) : undefined,
           signal: opts.parentSignal,
         });
         const collected = await collectReply({
@@ -345,7 +363,7 @@ export async function spawnJob(opts: {
           signal: opts.parentSignal,
           sanitize: opts.sanitizeReply,
         });
-        appendJournal(runDir, {
+        if (!opts.prepared) appendJournal(runDir, {
           jobId,
           model: resolved.model,
           thinking: resolved.thinking,
@@ -361,7 +379,7 @@ export async function spawnJob(opts: {
         monitor.releaseTicket(ticketId);
         return {
           text:
-            `Spawned ${jobId} [${resolved.role}] ${resolved.model}:${resolved.thinking}` +
+            `Spawned ${jobId} ${resolved.model}:${resolved.thinking}` +
             `${resolved.local ? " [local]" : ""}\n` +
             `pane ${paneId} workspace ${workspaceId}` +
             `${nudgedEnter ? " (Enter nudged)" : ""}\n\n` +
@@ -369,12 +387,6 @@ export async function spawnJob(opts: {
           details: { handle, collected, nudgedEnter },
           handle,
         };
-      } catch (err) {
-        state.activeMonitors.delete(jobId);
-        if (localHeld) localLock.release(jobId);
-        monitor.releaseTicket(ticketId);
-        throw err;
-      }
     }
 
     // Async monitor outlives this tool call. Tool-batch cancellation must not
@@ -384,6 +396,7 @@ export async function spawnJob(opts: {
       ticketId,
       handle,
       timeoutMs: timeoutMs || DEFAULT_DISPATCH_TIMEOUT_MS,
+      mailboxFinished: mailbox ? () => mailbox.isFinished(jobId) : undefined,
     });
 
     // Patch monitor completion to release local + journal + clear active
@@ -418,6 +431,16 @@ export async function spawnJob(opts: {
       handle,
     };
   } catch (err) {
+    if (startedPane) {
+      try {
+        await stopAgentInPane({ herdr, paneId: startedPane, signal: AbortSignal.timeout(35_000) });
+      } catch {
+        try { await herdr.closePane(startedPane, AbortSignal.timeout(10_000)); }
+        catch {
+          throw new JobCleanupError(`Could not stop pane ${startedPane}. Capacity and lanes remain held; stop it, then herd close jobId=${jobId}.`);
+        }
+      }
+    }
     if (ticketId) monitor.releaseTicket(ticketId);
     if (jobId) monitor.releaseThinkHold(jobId);
     if (localHeld && jobId) localLock.release(jobId);

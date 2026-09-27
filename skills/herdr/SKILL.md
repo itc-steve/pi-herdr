@@ -1,28 +1,12 @@
 ---
 name: herdr
-description: "View and control Herdr terminals. Prefer the herdr tool. For subagent jobs use herd — never herdr-run herd panes. Requires HERDR_ENV=1."
+description: View and control Herdr terminals. Use herd for subagent assignments. Requires HERDR_ENV=1.
 ---
 
-# Herdr (viewing + general terminal control)
+# Herdr agent instructions
 
-1. **`herd` tool** — assign work to local-first subagents (role=think for frontier)
-2. **`herdr` tool** — view/control terminals (including watching herd panes when the user asks)
-
-## Environment gate
-
-```bash
-test "${HERDR_ENV:-}" = 1
-```
-
-If unset, say you are not inside Herdr and stop.
-
-## Rules
-
-| Need | Use |
-|------|-----|
-| Assign / abort / steer jobs | `herd` |
-| User asks to **view** a job pane | `herdr workspace_focus` + `herdr read` |
-| Inventory every space | `herdr list scope=all` / `workspace_list` |
-| Drive **non-herd** terminals | `herdr` freely |
-
-**Never** `herdr run` into a herd job pane to assign work.
+- Check `HERDR_ENV=1` before terminal operations. If unset, explain that Herdr is required.
+- Use the structured `herdr` tool to inspect/control terminals. Use `herd` to assign, steer, accept, or cancel worker jobs.
+- Never use `herdr run` to assign work to herd workers; their queue and ownership belong to `herd`.
+- Use `list scope=all` to discover terminals outside the current workspace. Use returned IDs; do not invent them.
+- Preserve focus unless the user asks to switch. Do not close panes you did not create without explicit permission.

@@ -20,6 +20,7 @@ import {
   getOrCreateLocalLock,
   replaceHarnessDispose,
 } from "../src/harness/reload.ts";
+import { createHerdState, formatHerdFooter } from "../src/state.ts";
 
 describe("harness pi-holder", () => {
   it("safeSendFollowUp uses followUp + triggerTurn", () => {
@@ -117,13 +118,12 @@ describe("harness ui-bind", () => {
         notify: () => {},
       } as never,
     });
-    ui.setStatus("herd: 1");
-    ui.setWidgetLines(["x"]);
+    ui.setStatus("herd ● 1 ✓ 0");
     assert.equal(status.length, 0);
     assert.equal(widgets.length, 0);
   });
 
-  it("sets status and belowEditor widget when hasUI", () => {
+  it("sets a one-line belowEditor chip and deletes leftover status keys", () => {
     const status: unknown[] = [];
     const widgets: unknown[] = [];
     const ui = createHerdUiBinder();
@@ -136,15 +136,25 @@ describe("harness ui-bind", () => {
         notify: () => {},
       } as never,
     });
-    ui.setStatus("herd: 1 mon");
-    ui.setWidgetLines(["herd monitors (1)"]);
+    ui.setStatus("herd ● 1 ✓ 2");
     ui.clear();
-    assert.deepEqual(status[0], ["herd", "herd: 1 mon"]);
-    assert.equal((widgets[0] as unknown[])[0], "herd-tasks");
-    assert.deepEqual((widgets[0] as unknown[])[2], {
+    assert.deepEqual(status, [
+      ["herd", undefined],
+      ["herd", undefined],
+    ]);
+    assert.equal((widgets[1] as unknown[])[0], "herd");
+    assert.deepEqual((widgets[1] as unknown[])[1], ["herd ● 1 ✓ 2"]);
+    assert.deepEqual((widgets[1] as unknown[])[2], {
       placement: "belowEditor",
     });
-    assert.deepEqual(status.at(-1), ["herd", ""]);
+    assert.deepEqual(widgets.at(-1), ["herd", undefined, undefined]);
+  });
+
+  it("formats running and done counts for one footer segment", () => {
+    const state = createHerdState();
+    state.order.push("j01", "j02", "j03");
+    state.activeMonitors.add("j03");
+    assert.equal(formatHerdFooter(state), "herd ● 1 ✓ 2");
   });
 
   it("ensureHerdToolsActive adds missing tools", () => {

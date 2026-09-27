@@ -2,6 +2,61 @@
 
 All notable changes to `@itc-steve/pi-herdr` are documented here.
 
+## [2.0.0] — 2026-09-27
+
+**Breaking overhaul.** Do not treat this as a drop-in upgrade from 1.x. Rewrite `~/.pi/agent/herd.json`, then `/reload`. Bare `herd spawn` and think/do routing no longer choose a worker for you.
+
+### Warning — required config and spawn changes
+
+- **`herd.json` format.** Replace top-level `local`, `do[]`, `think[]`, and `maxModelConcurrent` with a `workers` map. Each worker needs `model`, `thinking`, and `maxConcurrent`. Set `workers.<name>.group` when two cloud workers share a subscription. `private.enabled` is unchanged (still default off).
+- **No default-local spawn.** Every spawn must pass `worker=` (or exact `model=`). `role=do|think` and `difficulty=` are not how work is assigned anymore.
+- **Writers need `owns=`.** Comma-separated project-relative files or directories. Omit it and the job is report-only.
+- **`after=` waits for `accept`, not completion.** Read the artifact, verify it, then `/herd accept jobId=…`. Completion alone does not release dependents.
+- **Queues are session-local.** Finish or abort jobs before `/reload`. There is no automatic resume across parent sessions.
+- **Old configs still load** (`local` / `do[]` / `think[]` fold into named workers) so Pi starts, but prompts and spawn behavior already follow 2.0. Migrate the file.
+
+New shape (replace the three model placeholders with IDs from your Pi setup):
+
+```json
+{
+  "workers": {
+    "local": {
+      "model": "local-provider/local-model",
+      "thinking": "medium",
+      "maxConcurrent": 2
+    },
+    "grok": {
+      "model": "grok-provider/grok-model",
+      "thinking": "medium",
+      "maxConcurrent": 1
+    },
+    "codex": {
+      "model": "openai-codex/codex-model",
+      "thinking": "medium",
+      "maxConcurrent": 1
+    }
+  },
+  "private": { "enabled": false }
+}
+```
+
+See `herd.json.example` and README “Upgrading from think/do”. Run `/herd models` after reload.
+
+### Added
+
+- Named workers. The parent chooses local, Grok, Codex, or another configured name. No think/do pipeline and no automatic local assignment.
+- Job queue with per-worker/`group` concurrency. Independent tasks can wait; only configured seats run.
+- Write lanes: overlapping `owns=` serializes; report-only reviews wait for writers in the same project.
+- `herd accept` — parent approval gate for `after=` dependents.
+- Run-scoped worker mailboxes: `herd peers`, `herd message`, `herd messages`. Advisory notes only. Private workers excluded.
+
+### Changed
+
+- `herd models` lists workers, not think/do catalogs.
+- `herd status` reports queued/running/accepted/blocked jobs and held capacity.
+- Default on-disk config writes the `workers` map.
+- README, skills, and package description match agent-chosen workers.
+
 ## [1.5.1] — 2026-09-18
 
 ### Added

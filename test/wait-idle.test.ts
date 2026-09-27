@@ -47,6 +47,21 @@ function herdr(getStatus: () => AgentStatus): HerdrClient {
 }
 
 describe("waitForJobIdle", () => {
+  it("does not release a mailbox worker on transient terminal idle before Pi settles", async () => {
+    let reads = 0;
+    let closed = false;
+    const client = { getPaneInfo: async () => {
+      reads++;
+      if (reads === 1) return pane("working");
+      if (reads >= 4) closed = true;
+      return pane("idle");
+    } } as unknown as HerdrClient;
+    const result = await waitForJobIdle({ herdr: client, paneId: "p1", timeoutMs: 3_000,
+      mailboxFinished: () => closed });
+    assert.equal(result.status, "idle");
+    assert.ok(reads >= 4);
+  });
+
   it("keeps waiting while pane is working past timeoutMs", async () => {
     const t0 = Date.now();
     const getStatus = (): AgentStatus =>

@@ -374,6 +374,7 @@ export function createHerdMonitor(opts: {
     ticketId: string;
     handle: JobHandle;
     timeoutMs?: number;
+    mailboxFinished?: () => boolean;
   }): MonitorJob {
     const herdr = opts.herdr();
     if (!herdr) {
@@ -411,6 +412,7 @@ export function createHerdMonitor(opts: {
           watermark: optsWatch.handle.watermark,
           outputPath: optsWatch.handle.outputPath,
           outputBaselineBytes: optsWatch.handle.outputBaselineBytes,
+          mailboxFinished: optsWatch.mailboxFinished,
           signal: ac.signal,
         });
 

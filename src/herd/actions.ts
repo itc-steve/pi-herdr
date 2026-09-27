@@ -1,6 +1,8 @@
 import type { HerdConfig } from "../types.ts";
 import { ensureHerdConfigFile, sessionDirAbs } from "../config.ts";
-import { formatModelsList } from "../resolve-model.ts";
+import { formatWorkers } from "../workers.ts";
+import { enqueueSpawn, waitForQueuedJob } from "./enqueue.ts";
+import type { JobQueue } from "./queue.ts";
 import {
   createRun,
   formatRunInfo,
@@ -8,24 +10,26 @@ import {
   requireActiveOrRef,
   setActiveRun,
 } from "../runs.ts";
-import { appendJournal, completedJobIds } from "../journal.ts";
-import { spawnJob, type SpawnParams } from "./spawn.ts";
+import { completedJobIds } from "../journal.ts";
 import type { LocalStreamLock } from "../local-lock.ts";
-import { formatStatus, type HerdState } from "../state.ts";
+import type { HerdState } from "../state.ts";
 import type { ModelProbeFn } from "../local/preflight.ts";
 import type { HerdrClient } from "../herdr/client.ts";
 import type { HerdMonitor } from "./monitor.ts";
 import {
   collectReply,
   stopAgentInPane,
-  waitForJobIdle,
-  DEFAULT_DISPATCH_TIMEOUT_MS,
 } from "./boot.ts";
 import { countSessionEntries } from "../readback.ts";
+import { formatMessages } from "./mailbox.ts";
+import type { WorkerMailbox } from "./mailbox-worker.ts";
 
 export type HerdActionParams = {
   action: string;
   task?: string;
+  text?: string;
+  worker?: string;
+  after?: string;
   role?: string;
   difficulty?: string;
   model?: string;
@@ -54,7 +58,9 @@ export type HerdRuntime = {
   localLock: LocalStreamLock;
   herdr: () => HerdrClient | null;
   monitor: HerdMonitor;
+  queue: JobQueue;
   modelProbe?: ModelProbeFn;
+  workerMailbox?: WorkerMailbox;
   /** Redaction for cloud parents; set by index.ts. Identity when absent. */
   sanitizeForCloud?: (text: string) => string;
 };
@@ -67,25 +73,36 @@ export async function executeHerd(
   const action = params.action;
   const config = runtime.getConfig();
 
+  if (["peers", "message", "messages"].includes(action)) {
+    if (process.env.PI_HERD_PRIVATE === "1") throw new Error("Private workers cannot use peer mailboxes; return sanitized findings through the assigned report.");
+    const worker = runtime.workerMailbox;
+    if (process.env.PI_HERD_WORKER === "1" && !worker) throw new Error("This worker has no mailbox; report blockers to the parent.");
+    if (worker && params.run) throw new Error("Workers cannot select another run's mailbox");
+    if (action === "message" && (!params.jobId?.trim() || typeof params.text !== "string")) throw new Error("message requires jobId= and text=");
+    const target = params.jobId ? runtime.state.jobs[params.jobId] : undefined;
+    if (!worker && action === "message" && (!target || target.private)) throw new Error("Unknown or private target; peer messaging is unavailable");
+    const runId = worker ? undefined : target?.runId ?? requireActiveOrRef(config.sessionDir, params.run).runId;
+    if (!worker && target && params.run && requireActiveOrRef(config.sessionDir, params.run).runId !== target.runId) throw new Error("Target belongs to another run");
+    const box = worker?.box ?? runtime.state.mailboxes.get(runId!);
+    if (!box) return { text: "No mailbox workers in this run.", details: { action } };
+    if (action === "peers") {
+      const peers = box.peers().filter((p) => p.id !== worker?.jobId);
+      return { text: peers.map((p) => `${p.id} [${p.status}] ${p.label}`).join("\n") || "No peers in this run.", details: { action, peers } };
+    }
+    if (action === "messages") return { text: formatMessages(box.messages(worker?.jobId)), details: { action } };
+    const message = box.send(worker?.jobId ?? "parent", params.jobId!.trim(), params.text!);
+    return { text: `Message ${message.id}: ${message.status}.` + (message.status === "recipient-finished" ? " Recipient will not restart. Report this blocker to the parent; the note remains in herd messages." : " Delivery occurs at the recipient's next turn boundary. Do not wait indefinitely or send acknowledgement-only replies."), details: { action, messageId: message.id, status: message.status } };
+  }
+
   if (action === "models") {
     ensureHerdConfigFile();
-    const text = formatModelsList(
-      config,
-      runtime.localLock.inUse(),
-      runtime.localLock.queued(),
-    );
+    const text = formatWorkers(config);
     return { text, details: { action } };
   }
 
   if (action === "status") {
-    const monLines = runtime.monitor.formatStatusLines();
-    const base = formatStatus(
-      runtime.state,
-      runtime.localLock.inUse(),
-      runtime.localLock.maxStreamsCount(),
-      runtime.monitor.activeCount(),
-      config.maxModelConcurrent,
-    );
+    const monLines = runtime.queue.list().map((j) => `${j.id} ${j.status}${j.held ? " [capacity/lanes held]" : ""} group=${j.group}${j.after.length ? ` after=${j.after.join(",")}` : ""}${j.error ? ` · ${runtime.sanitizeForCloud?.(j.error) ?? j.error}` : ""}`);
+    const base = `herd status\nlocal seats: ${runtime.localLock.inUse()}/${runtime.localLock.maxStreamsCount()}\ntracked jobs: ${runtime.queue.list().length}`;
     const text = monLines.length
       ? `${base}\n\n${monLines.join("\n")}`
       : base;
@@ -156,29 +173,23 @@ export async function executeHerd(
         "herd spawn requires running inside Herdr (HERDR_ENV=1). Start pi from a herdr pane.",
       );
     }
-    return spawnJob({
-      config,
-      params: params as SpawnParams,
-      state: runtime.state,
-      localLock: runtime.localLock,
-      herdr,
-      monitor: runtime.monitor,
-      modelProbe: runtime.modelProbe,
-      sanitizeReply: runtime.sanitizeForCloud,
-      parentSignal: signal,
-    });
+    return enqueueSpawn(runtime, params, signal);
+  }
+
+  if (action === "accept") {
+    if (!params.jobId) throw new Error("accept requires jobId=");
+    runtime.queue.accept(params.jobId);
+    return { text: `Accepted ${params.jobId}; eligible dependents may now run.`, details: { action, jobId: params.jobId } };
   }
 
   if (action === "abort") {
-    const aborted = runtime.monitor.abort({
-      jobId: params.jobId,
-      all: params.all === true,
-    });
+    if (!params.jobId && !params.all) throw new Error("abort requires jobId= or all=true");
+    const aborted = runtime.queue.abort(params.all ? undefined : params.jobId);
     // Esc interrupt on panes
     const herdr = runtime.herdr();
     if (herdr && params.jobId) {
       const job = runtime.state.jobs[params.jobId];
-      if (job) {
+      if (job?.paneId) {
         try {
           await herdr.sendKeys(job.paneId, ["Escape"], signal);
         } catch {
@@ -188,7 +199,7 @@ export async function executeHerd(
     } else if (herdr && params.all) {
       for (const id of runtime.state.activeMonitors) {
         const job = runtime.state.jobs[id];
-        if (!job) continue;
+        if (!job?.paneId) continue;
         try {
           await herdr.sendKeys(job.paneId, ["Escape"], signal);
         } catch {
@@ -198,8 +209,8 @@ export async function executeHerd(
     }
     return {
       text: aborted.length
-        ? `Aborted monitors: ${aborted.join(", ")}`
-        : "No matching active monitors to abort",
+        ? `Cancellation requested: ${aborted.join(", ")}`
+        : "No matching queued or running jobs to abort",
       details: { action, aborted },
     };
   }
@@ -212,6 +223,7 @@ export async function executeHerd(
     if (!jobId || !task) throw new Error("steer requires jobId= and task=");
     const job = runtime.state.jobs[jobId];
     if (!job) throw new Error(`Unknown job '${jobId}'`);
+    if (runtime.queue.get(jobId)?.status !== "running" || !job.paneId) throw new Error("Steer only a running, booted job. For corrections, spawn a new job with owns= and after=.");
     const watermark = countSessionEntries(job.sessionFile);
     const { submitTaskToPane } = await import("./boot.ts");
     await submitTaskToPane({
@@ -235,19 +247,11 @@ export async function executeHerd(
     if (!jobId) throw new Error("wait requires jobId=");
     const job = runtime.state.jobs[jobId];
     if (!job) throw new Error(`Unknown job '${jobId}'`);
-    await waitForJobIdle({
-      herdr,
-      paneId: job.paneId,
-      timeoutMs: params.timeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS,
-      allowIdleWithoutBusy: true,
-      sessionFile: job.sessionFile,
-      watermark: job.watermark ?? 0,
-      outputPath: job.outputPath,
-      outputBaselineBytes: job.outputBaselineBytes,
-      signal,
-    });
+    const queued = runtime.queue.get(jobId);
+    if (!queued) throw new Error(`No queued job '${jobId}'`);
+    await waitForQueuedJob(queued.finished, params.timeoutMs, signal);
     return {
-      text: `Job ${jobId} is idle`,
+      text: `Job ${jobId}: ${queued.status}${queued.error ? ` · ${runtime.sanitizeForCloud?.(queued.error) ?? queued.error}` : ""}`,
       details: { action, jobId },
     };
   }
@@ -259,6 +263,8 @@ export async function executeHerd(
     if (!jobId) throw new Error("collect requires jobId=");
     const job = runtime.state.jobs[jobId];
     if (!job) throw new Error(`Unknown job '${jobId}'`);
+    const queued = runtime.queue.get(jobId);
+    if (queued && !["completed", "accepted"].includes(queued.status)) throw new Error(`Job ${jobId} is ${queued.status}; no completed result to collect.`);
     const handle = {
       jobId: job.jobId,
       label: job.label,
@@ -292,6 +298,12 @@ export async function executeHerd(
     if (!jobId) throw new Error("close requires jobId=");
     const job = runtime.state.jobs[jobId];
     if (!job) throw new Error(`Unknown job '${jobId}'`);
+    const queued = runtime.queue.get(jobId);
+    if (queued?.status === "queued" || queued?.status === "running") {
+      runtime.queue.abort(jobId);
+      await waitForQueuedJob(queued.finished, params.timeoutMs, signal);
+    }
+    if (!job.paneId) return { text: `Cancelled ${jobId} before boot`, details: { action, jobId } };
     try {
       await stopAgentInPane({ herdr, paneId: job.paneId, signal });
     } catch {
@@ -300,6 +312,8 @@ export async function executeHerd(
     await herdr.closePane(job.paneId, signal);
     runtime.state.activeMonitors.delete(jobId);
     runtime.localLock.release(jobId);
+    for (const entry of runtime.monitor.listJobs()) if (entry.handle.jobId === jobId) runtime.monitor.releaseTicket(entry.id);
+    runtime.queue.releaseBlocked(jobId);
     return {
       text: `Closed pane for ${jobId}`,
       details: { action, jobId },

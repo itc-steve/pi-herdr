@@ -280,39 +280,19 @@ export async function createAndBootJob(opts: {
   sessionFile: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  onPaneCreated?: (paneId: string, workspaceId: string) => void;
 }): Promise<{ paneId: string; workspaceId: string }> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
   const currentPane = await opts.herdr.getCurrentPaneInfo(opts.signal);
   const workspaceId = currentPane.workspace_id;
-  const tabs = await opts.herdr.getTabList(workspaceId, opts.signal);
-  const matches = tabs.filter((tab) => (tab.label || "").trim() === opts.label);
-  if (matches.length > 1) {
-    throw new Error(
-      `Ambiguous tabs labeled '${opts.label}' in workspace ${workspaceId}: ` +
-        `${matches.map((tab) => tab.tab_id).join(", ")}. Rename or close extras.`,
-    );
-  }
+  // Always a new tab: two-word labels collide, so reuse-by-name would steal a live worker.
+  const created = await opts.herdr.createTab(
+    { workspaceId, label: opts.label, cwd: opts.cwd },
+    opts.signal,
+  );
+  const paneId = created.paneId;
 
-  let paneId: string;
-  if (matches[0]) {
-    const panes = (await opts.herdr.getPaneList(workspaceId, opts.signal)).filter(
-      (pane) => pane.tab_id === matches[0]!.tab_id,
-    );
-    const labeled =
-      panes.find((pane) => (pane.label || "").trim() === opts.label) ?? panes[0];
-    if (!labeled) throw new Error(`Tab '${opts.label}' has no pane`);
-    paneId = labeled.pane_id;
-    if (paneHasAgent(labeled)) {
-      await stopAgentInPane({ herdr: opts.herdr, paneId, signal: opts.signal });
-    }
-  } else {
-    const created = await opts.herdr.createTab(
-      { workspaceId, label: opts.label, cwd: opts.cwd },
-      opts.signal,
-    );
-    paneId = created.paneId;
-  }
-
+  opts.onPaneCreated?.(paneId, workspaceId);
   await bootIntoPane({
     herdr: opts.herdr,
     paneId,
@@ -459,6 +439,8 @@ export async function waitForJobIdle(opts: {
   watermark?: number;
   outputPath?: string;
   outputBaselineBytes?: number;
+  /** Pi must close reception before we release this worker's lanes/capacity. */
+  mailboxFinished?: () => boolean;
   signal?: AbortSignal;
 }): Promise<{ status: string; sawBusy: boolean }> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS;
@@ -506,6 +488,12 @@ export async function waitForJobIdle(opts: {
           hasPostSubmitEvidence());
 
       if (statusReady) {
+        if (opts.mailboxFinished && !opts.mailboxFinished()) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          await sleep(Math.min(POLL_MS, remaining), opts.signal);
+          continue;
+        }
         if (
           opts.outputPath &&
           !isOutputReady(opts.outputPath, opts.outputBaselineBytes)
@@ -552,7 +540,8 @@ export async function waitForJobIdle(opts: {
 
   if (
     (last === "idle" || last === "done") &&
-    (sawBusy || (opts.allowIdleWithoutBusy && hasPostSubmitEvidence()))
+    (sawBusy || (opts.allowIdleWithoutBusy && hasPostSubmitEvidence())) &&
+    (!opts.mailboxFinished || opts.mailboxFinished())
   ) {
     if (
       opts.outputPath &&
@@ -633,6 +622,12 @@ export function taskPreview(task: string, max = 120): string {
   return one.length <= max ? one : `${one.slice(0, max - 1)}…`;
 }
 
+/** Herdr tab/pane title: two words (task or role). */
+export function shortTabLabel(text: string, fallback = "job"): string {
+  const words = text.trim().split(/\s+/).filter(Boolean).slice(0, 2);
+  return words.join(" ") || fallback;
+}
+
 export function formatHerdResultMessage(opts: {
   jobId: string;
   label: string;
@@ -652,7 +647,7 @@ export function formatHerdResultMessage(opts: {
   const delivery = opts.resultDelivery ?? "pointer";
   const lines = [
     `Herd ${opts.jobId} (${opts.label}) ${opts.status}`,
-    `role=${opts.role} model=${opts.model}:${opts.thinking}`,
+    `model=${opts.model}:${opts.thinking}`,
     `task: ${opts.taskPreview}`,
   ];
   if (opts.runId) lines.push(`run: ${opts.runId}`);

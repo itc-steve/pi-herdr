@@ -1,34 +1,23 @@
 {
-  "sessionDir": "~/.pi/agent/herd",
-  "maxModelConcurrent": 2,
-  "local": {
-    "enabled": true,
-    "model": "vllm/Qwen/Qwen3.6-27B-FP8",
-    "thinking": "medium",
-    "preflight": true
-  },
-  "do": [
-    { "model": "grok-cli/grok-build", "thinking": "medium" }
-  ],
-  "think": [
-    {
-      "model": "grok-cli/grok-4.6",
-      "thinking": "high"
+  "workers": {
+    "local": {
+      "model": "local-provider/local-model",
+      "thinking": "medium",
+      "maxConcurrent": 2,
+      "description": "Small tasks with clear checks; private customer data, PII, and secrets."
     },
-    {
-      "model": "openai-codex/gpt-5.6-sol",
-      "thinking": "high"
+    "grok": {
+      "model": "grok-provider/grok-model",
+      "thinking": "medium",
+      "maxConcurrent": 1,
+      "description": "Implementation, investigation, or independent review."
+    },
+    "codex": {
+      "model": "openai-codex/codex-model",
+      "thinking": "medium",
+      "maxConcurrent": 1,
+      "description": "Implementation, investigation, or independent review."
     }
-  ],
-  "private": {
-    "enabled": false
   },
-  "defaults": {
-    "isolation": "none",
-    "timeoutMs": 600000,
-    "waitForReply": false,
-    "requireOutput": true,
-    "resultDelivery": "pointer",
-    "triggerTurnOnResult": true
-  }
+  "private": { "enabled": false }
 }

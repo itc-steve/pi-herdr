@@ -1,6 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseHerdConfig, defaultConfigObject } from "../src/config.ts";
+import { parseHerdConfig } from "../src/config.ts";
+
+// Legacy resolver coverage retained during named-worker migration.
+function defaultConfigObject(): Record<string, unknown> {
+  return { local: { model: "vllm/Qwen/Qwen3.6-27B-FP8", thinking: "medium" },
+    think: [{ model: "grok-cli/grok-4.6", thinking: "high" }, { model: "openai-codex/gpt-5.6-sol", thinking: "high" }], private: { enabled: false } };
+}
 import {
   resolveModel,
   resolveModelClaimingLocal,

@@ -1,7 +1,7 @@
 {
   "name": "@itc-steve/pi-herdr",
-  "version": "1.5.1",
-  "description": "Pi extension for Herdr-visible subagent herds - default-local workers, optional ranked-frontier think, markdown handoff.",
+  "version": "2.0.0",
+  "description": "Pi extension for Herdr-visible agent-chosen workers, queued tasks, write lanes, and private-local operations.",
   "keywords": [
     "pi-package",
     "pi",
@@ -9,7 +9,7 @@
     "herdr",
     "herd",
     "multi-agent",
-    "local-first",
+    "agent-chosen",
     "vllm",
     "pane-management"
   ],

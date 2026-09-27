@@ -10,6 +10,7 @@ import type {
   PrivateConfig,
   ResultDelivery,
   Role,
+  WorkerConfig,
 } from "./types.ts";
 
 const DEFAULT_SESSION_DIR = "~/.pi/agent/herd";
@@ -178,9 +179,41 @@ export function resolveRole(opts: {
   );
 }
 
+function normalizeWorkers(raw: unknown, local: LocalConfig, localMax: number, legacy: CatalogEntry[]): Record<string, WorkerConfig> {
+  const workers: Record<string, WorkerConfig> = Object.create(null);
+  if (raw == null) {
+    if (local.enabled) workers.local = { model: local.model, thinking: local.thinking, local: true, maxConcurrent: localMax, group: "local", description: "Small, bounded tasks and private customer/PII/secret operations." };
+    for (const entry of legacy) {
+      if (entry.model === local.model || Object.values(workers).some((w) => w.model === entry.model)) continue;
+      const base = /grok|xai/i.test(entry.model) ? "grok" : /codex|openai/i.test(entry.model) ? "codex" : "cloud";
+      let name = base;
+      for (let n = 2; workers[name]; n++) name = `${base}${n}`;
+      workers[name] = { ...entry, local: false, maxConcurrent: 1, group: base, description: "General-purpose implementation, investigation, or review." };
+    }
+    return workers;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error('herd.json "workers" must be an object');
+  for (const [name, value] of Object.entries(raw)) {
+    if (!/^[a-z][a-z0-9_-]*$/.test(name) || ["constructor", "prototype", "__proto__"].includes(name)) throw new Error(`Invalid worker name '${name}'`);
+    const entry = normalizeEntry(value, 0, `workers.${name}`);
+    const obj = value as Record<string, unknown>;
+    const cap = obj.maxConcurrent ?? (name === "local" ? localMax : 1);
+    if (typeof cap !== "number" || !Number.isSafeInteger(cap) || cap < 1) throw new Error(`workers.${name}.maxConcurrent must be a positive integer`);
+    if (entry.local === true && name !== "local") throw new Error("Only worker 'local' may be trusted as local");
+    workers[name] = {
+      ...entry, local: name === "local", maxConcurrent: cap,
+      group: name === "local" ? "local" : typeof obj.group === "string" && obj.group.trim() ? obj.group.trim() : name,
+      description: typeof obj.description === "string" ? obj.description : name === "local" ? "Small bounded tasks; private customer information, PII, and secrets." : "General-purpose implementation, investigation, or review.",
+    };
+    if (name !== "local" && workers[name]!.group === "local") throw new Error("Cloud workers cannot share the local group");
+  }
+  if (!Object.keys(workers).length) throw new Error("workers must define at least one worker");
+  return workers;
+}
+
 /** Parse a herd.json object into a validated HerdConfig. */
 export function parseHerdConfig(raw: unknown): HerdConfig {
-  if (!raw || typeof raw !== "object") {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("herd.json must be a JSON object");
   }
   const obj = raw as Record<string, unknown>;
@@ -205,8 +238,20 @@ export function parseHerdConfig(raw: unknown): HerdConfig {
   );
   const think = foldThink(obj, local.model);
   const privateConfig = normalizePrivate(obj.private);
+  const workers = normalizeWorkers(obj.workers, local, maxModelConcurrent, [...doModels, ...think]);
+  if (obj.workers != null) {
+    const worker = workers.local;
+    local.enabled = !!worker;
+    if (worker) {
+      local.model = worker.model;
+      local.thinking = worker.thinking;
+      maxModelConcurrent = worker.maxConcurrent;
+      const rawLocal = (obj.workers as Record<string, Record<string, unknown>>).local;
+      local.preflight = rawLocal?.preflight !== false;
+    }
+  }
 
-  if (!local.enabled && think.length === 0 && doModels.length === 0) {
+  if (!Object.keys(workers).length) {
     throw new Error(
       "herd.json must enable local or define at least one think or do model",
     );
@@ -217,6 +262,7 @@ export function parseHerdConfig(raw: unknown): HerdConfig {
     sessionPolicy: "per-job",
     maxModelConcurrent,
     local,
+    workers,
     do: doModels,
     think,
     private: privateConfig,
@@ -252,28 +298,14 @@ export function ensureHerdConfigFile(path = defaultHerdPath()): HerdConfig {
 export function defaultConfigObject(): Record<string, unknown> {
   return {
     sessionDir: DEFAULT_SESSION_DIR,
-    maxModelConcurrent: DEFAULT_MAX_MODEL_CONCURRENT,
-    local: {
-      enabled: true,
-      model: DEFAULT_LOCAL_MODEL,
-      thinking: "medium",
-      preflight: true,
+    workers: {
+      local: { model: DEFAULT_LOCAL_MODEL, thinking: "medium", maxConcurrent: 2, preflight: true, description: "Small bounded tasks; private customer information, PII, and secrets." },
+      grok: { model: "grok-cli/grok-4.6", thinking: "medium", maxConcurrent: 1, group: "grok", description: "General-purpose implementation, investigation, or review." },
+      codex: { model: "openai-codex/gpt-5.6-sol", thinking: "medium", maxConcurrent: 1, group: "codex", description: "General-purpose implementation, investigation, or review." },
     },
-    think: [
-      {
-        model: "grok-cli/grok-4.6",
-        thinking: "high",
-      },
-      {
-        model: "openai-codex/gpt-5.6-sol",
-        thinking: "high",
-      },
-    ],
     private: { enabled: false },
     defaults: {
-      isolation: "none",
       timeoutMs: DEFAULT_TIMEOUT_MS,
-      waitForReply: false,
       requireOutput: true,
       resultDelivery: "pointer",
       triggerTurnOnResult: true,

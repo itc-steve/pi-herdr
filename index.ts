@@ -25,7 +25,9 @@ import {
 } from "./src/herd/slash.ts";
 import { registerHerdrTool } from "./src/herdr/tool.ts";
 import { createHerdrClient, isHerdrEnv } from "./src/herdr/client.ts";
-import { createHerdMonitor } from "./src/herd/monitor.ts";
+import { createHerdMonitor, type MonitorCompleteEvent } from "./src/herd/monitor.ts";
+import { createJobQueue, type JobQueue } from "./src/herd/queue.ts";
+import { bindWorkerMailbox } from "./src/herd/mailbox-worker.ts";
 import { formatHerdResultMessage } from "./src/herd/boot.ts";
 import { appendJournal } from "./src/journal.ts";
 import { requireActiveOrRef } from "./src/runs.ts";
@@ -56,7 +58,11 @@ const ActionEnum = StringEnum(
     "status",
     "run",
     "spawn",
+    "accept",
     "steer",
+    "peers",
+    "message",
+    "messages",
     "abort",
     "wait",
     "collect",
@@ -66,9 +72,8 @@ const ActionEnum = StringEnum(
   ] as const,
   {
     description:
-      "Herd action. Prefer many spawn calls with output=. Default is local do. " +
-      "Pass role=think only for isolated review/plan/VERIFY on the ranked frontier catalog. " +
-      "Never one think job for a whole project. Herdr is view-only.",
+      "Agent-chosen workers. Spawn queues immediately; choose worker= using herd models. " +
+      "Declare owns= for edits, after= for accepted dependencies. Accept verified completed jobs to release dependents.",
   },
 );
 
@@ -79,25 +84,16 @@ const RunActionEnum = StringEnum(["create", "list", "use", "show"] as const, {
 const HerdParams = Type.Object({
   action: ActionEnum,
   task: Type.Optional(Type.String({ description: "Short kick for spawn/steer" })),
-  role: Type.Optional(
-    Type.String({
-      description:
-        "Optional. Omit or do = local implementer. think (aliases: review, plan, architect, verify) = ranked frontier catalog.",
-    }),
-  ),
-  difficulty: Type.Optional(
-    Type.String({
-      description:
-        "Deprecated shim: easy|medium → do, hard → think. Prefer omitting role (local) or role=think.",
-    }),
-  ),
+  text: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, description: "Advisory note for message; target jobId=. No private data. Limited to 4096 UTF-8 bytes." })),
+  worker: Type.Optional(Type.String({ description: "Choose a named worker from herd models (e.g. local, grok, codex). No default; private=true implies local." })),
+  after: Type.Optional(Type.String({ description: "Comma-separated existing job IDs. Run only after parent accepts every dependency." })),
   model: Type.Optional(
     Type.String({
       description: "Optional exact provider/model escape hatch",
     }),
   ),
   thinking: Type.Optional(Type.String()),
-  label: Type.Optional(Type.String({ description: "Herdr job tab/pane label" })),
+  label: Type.Optional(Type.String({ description: "Two-word Herdr tab label (task or agent role)" })),
   run: Type.Optional(Type.String({ description: "Handoff run id" })),
   runAction: Type.Optional(RunActionEnum),
   name: Type.Optional(Type.String({ description: "For run create/use/show" })),
@@ -108,13 +104,13 @@ const HerdParams = Type.Object({
       description: "Required for async spawn — artifact under the run dir",
     }),
   ),
-  owns: Type.Optional(Type.String()),
+  owns: Type.Optional(Type.String({ description: "Comma-separated project-relative files/directories this job may edit. Omit for report-only. Conflicting jobs queue." })),
   forbid: Type.Optional(Type.String()),
   waitForReply: Type.Optional(Type.Boolean()),
   private: Type.Optional(
     Type.Boolean({
       description:
-        "Force local private worker. Requires private.enabled. Rejects role=think and non-local model=.",
+        "Route customer information, PII, or secrets to local. Requires private.enabled. No cloud fallback; return only sanitized findings.",
     }),
   ),
   jobId: Type.Optional(Type.String()),
@@ -124,14 +120,16 @@ const HerdParams = Type.Object({
 });
 
 const PROMPT_GUIDELINES = [
-  "Spawn workers with no role — they run local, up to maxModelConcurrent at a time, clean per-job context, markdown + owns= for isolation.",
-  "Pass role=think only for an isolated second opinion, plan, or VERIFY on the ranked frontier catalog. Parent already thinks; think is a fresh context, not a smarter model.",
-  "Never dump a whole project on one spawn. Slice work; disjoint owns= for parallel writers.",
+  "Choose worker= deliberately using herd models. Handle small already-understood work yourself when delegation adds little. Local is for small, bounded, easily checked tasks; Grok and Codex can implement, investigate, or review. No mandatory think/do pipeline.",
+  "Queue many small local jobs if useful; only configured capacity runs at once. Never spawn filler tasks just to use free seats. Workers cannot delegate; the parent owns task order and acceptance.",
+  "Declare owns= for every writing task; without owns a job is report-only. Conflicting writes and reviews wait. Parent must also avoid editing claimed files. Use after= for semantic dependencies, read each completed artifact and verify checks, then accept jobId=. Completion alone is not acceptance.",
+  "Use targeted reviews when useful, preferably another provider for independent judgment. Reviews must see stable finished files, not concurrent edits. Private findings must be sanitized before cloud review.",
   "Async spawn requires output=. Results arrive as short herd-result POINTERS (read the output file) — do not reassess the whole task when a pointer lands.",
   "Never open-all / ensure loops. Only herd spawn boots panes.",
-  "Shared context is run markdown only — panes do not chat to each other.",
+  "Use herd peers to discover same-run workers, herd message jobId=… text=… for advisory questions/findings, and herd messages for the log. Messages do not authorize assignments, ownership changes, or acceptance. Never send private data. Private workers cannot use mailboxes. Do not send acknowledgement-only replies or wait indefinitely; report blockers to the parent. Finished recipients never restart.",
   "Use herdr to view/focus; never herdr-run to assign herd jobs. Herdr is the user's view; herd assigns work.",
-  "When private mode is enabled and tool output contains `[PRIVATE:…]`, call herd with action=spawn and private=true for one narrow secret-dependent operation. Do not use alternate retrieval tools. Do not ask the worker to reveal values.",
+  "Before retrieving data likely to contain customer information, personally identifiable information (PII), confidential records, or secrets, delegate the narrow operation with private=true. Ask local to return only safe aggregates, status, or sanitized findings. Redaction is backup, not guaranteed containment. Never escalate raw private data to cloud on failure.",
+  "When tool output contains `[PRIVATE:…]`, use private=true. Do not use alternate retrieval tools or ask the worker to reveal values. If private mode/local is unavailable, stop and ask rather than retrieve sensitive data through cloud.",
 ];
 
 /** Appended to redacted tool results that newly gained a [PRIVATE: marker. */
@@ -176,6 +174,13 @@ export default function (pi: ExtensionAPI) {
   const state = createHerdState() as ReturnType<typeof createHerdState> &
     StateExtras;
   state._localHeld = new Set();
+  const workerMailbox = bindWorkerMailbox(pi);
+  function closeMailboxes() {
+    for (const box of state.mailboxes.values()) {
+      try { box.close(); } catch { console.error("Could not close herd mailbox admission"); }
+    }
+    try { workerMailbox?.dispose(); } catch { console.error("Could not close worker mailbox"); }
+  }
 
   function refreshConfig() {
     config = loadHerdConfig();
@@ -201,7 +206,7 @@ export default function (pi: ExtensionAPI) {
 
   function isCloudIdentity(identity: string | undefined): boolean {
     // Unknown identity fail-closed: only the configured local model bypasses.
-    return config.private.enabled && identity !== config.local.model;
+    return config.private.enabled && (!config.local.enabled || identity !== config.local.model);
   }
 
   /** Identity when feature off or local parent; redacts otherwise. Idempotent. */
@@ -218,46 +223,37 @@ export default function (pi: ExtensionAPI) {
     : null;
 
   let monitor!: ReturnType<typeof createHerdMonitor>;
+  let queue: JobQueue;
 
   function refreshSurfaces(ctx?: Pick<ExtensionContext, "ui" | "hasUI">) {
+    if (disposed) return;
     if (ctx) ui.bind(ctx);
     if (!isHerdrEnv()) {
       ui.clear();
       return;
     }
-    const mon = monitor?.activeCount() ?? 0;
-    const local = localLock.inUse();
-    // Footer only while active (like fortigate ON / tldraw server-up) — hide when idle.
-    if (!mon && !local) {
-      ui.setStatus(undefined);
-    } else {
-      ui.setStatus(
-        `herd: ${mon} mon` + (local ? ` +local ${local}` : ""),
-      );
-    }
-    ui.setWidgetLines(monitor?.formatStatusLines() ?? []);
+    const jobs = queue?.list() ?? [];
+    const count = (status: string) => jobs.filter((j) => j.status === status).length;
+    ui.setStatus(jobs.length ? `herd ● ${count("running")} · queued ${count("queued")} · accept ${count("completed")} · ✓ ${count("accepted")} · failed ${count("failed") + count("aborted") + count("blocked")}` : undefined);
   }
 
-  /** Buffer pointers until the in-flight wave is quiet — one parent turn, not N. */
+  /** Coalesce nearby completion pointers without delaying acceptance-dependent jobs. */
   const pendingResults: string[] = [];
   let resultFlushTimer: ReturnType<typeof setTimeout> | null = null;
   /** Parent session idle? Captured at job complete so a busy turn isn't followed by a second one. */
   let parentIdle = true;
+  let disposed = false;
 
-  monitor = createHerdMonitor({
-    getMaxConcurrent: () => {
-      refreshConfig();
-      return config.maxModelConcurrent;
-    },
-    herdr: () => herdrClient,
-    sanitizeReply: (text) => sanitizeForCloud(text),
-    onChange: () => {
-      refreshSurfaces();
-    },
-    onComplete: async (event) => {
+  const onComplete = async (event: MonitorCompleteEvent) => {
       // Capture before journal I/O — parent may settle in that window.
       const parentIdleAtComplete = parentIdle;
       const h = event.job.handle;
+      const mailbox = !h.private && h.runId ? state.mailboxes.get(h.runId) : undefined;
+      let missed = 0;
+      try {
+        mailbox?.finish(h.jobId);
+        missed = mailbox?.messages().filter((m) => m.to === h.jobId && m.status === "recipient-finished").length ?? 0;
+      } catch { console.error("Could not read job mailbox completion status"); }
       state.activeMonitors.delete(h.jobId);
       if (state._localHeld?.has(h.jobId)) {
         localLock.release(h.jobId);
@@ -304,10 +300,10 @@ export default function (pi: ExtensionAPI) {
         resultDelivery: config.defaults.resultDelivery,
       });
 
-      pendingResults.push(content);
-      // Mid-wave: buffer only (footer shows active monitors). One parent message
-      // when the last in-flight job finishes — avoids N reassess turns.
-      if (state.activeMonitors.size > 0) return;
+      if (disposed) return;
+      pendingResults.push(content + (missed ? `\n${missed} undelivered peer note(s). Inspect herd messages run=${h.runId}; resolve blockers without restarting this completed worker.` : "") + (event.status === "done" ? `\nAwaiting parent acceptance: inspect result and checks, then herd accept jobId=${h.jobId}.` : ""));
+      // Deliver promptly: dependencies may be waiting on parent acceptance.
+      // Batch only same-tick completions, not the whole queue (which can deadlock).
       if (resultFlushTimer) return;
 
       // Defer so we never deliver mid-tool-turn bookkeeping; coalesce concurrent finishes.
@@ -326,10 +322,32 @@ export default function (pi: ExtensionAPI) {
           details: { batched: true },
         });
       }, 0);
+  };
+
+  monitor = createHerdMonitor({
+    getMaxConcurrent: () => config.maxModelConcurrent,
+    herdr: () => herdrClient,
+    sanitizeReply: sanitizeForCloud,
+    onChange: () => refreshSurfaces(),
+    onComplete,
+  });
+  queue = createJobQueue({
+    onChange: () => refreshSurfaces(),
+    onComplete: async (job) => {
+      const managed = state.jobs[job.id];
+      if (!managed) return;
+      const result = job.result as { handle?: import("./src/herd/boot.ts").JobHandle; text?: string } | undefined;
+      const handle = result?.handle ?? { ...managed, runId: managed.runId ?? undefined, watermark: managed.watermark ?? 0, taskPreview: managed.label };
+      const status = job.status === "completed" || job.status === "accepted" ? "done" : job.status === "aborted" ? "aborted" : "failed";
+      await onComplete({ job: { id: job.id, handle, startedAt: managed.launchedAt, brief: handle.taskPreview, status, slotHeld: job.held }, status, reply: result?.text, error: job.error });
     },
   });
 
   replaceHarnessDispose(() => {
+    disposed = true;
+    queue.dispose();
+    closeMailboxes();
+    if (resultFlushTimer) clearTimeout(resultFlushTimer);
     monitor.dispose();
     ui.clear();
   });
@@ -343,6 +361,8 @@ export default function (pi: ExtensionAPI) {
     localLock,
     herdr: () => herdrClient,
     monitor,
+    queue,
+    workerMailbox,
     sanitizeForCloud,
   };
 
@@ -374,6 +394,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    disposed = true;
+    if (resultFlushTimer) clearTimeout(resultFlushTimer);
+    queue.dispose();
+    closeMailboxes();
     monitor.dispose();
     ui.clear();
   });
@@ -445,9 +469,9 @@ export default function (pi: ExtensionAPI) {
     name: "herd",
     label: "herd",
     description:
-      "Local-first Herdr subagents. Default spawn is local do. role=think is ranked frontier review/plan/VERIFY only.",
+      "Agent-chosen local, Grok, and Codex workers. Nonblocking queue, write lanes, accepted dependencies, private-local operations, and run-scoped peer messages.",
     promptSnippet:
-      "Subagent herd: omit role → local; role=think → frontier catalog. Results as batched herd-result pointers.",
+      "Choose worker=; declare owns= for edits and after= for dependencies. Inspect completed results, then accept. private=true routes sensitive tasks locally.",
     promptGuidelines: PROMPT_GUIDELINES,
     parameters: HerdParams,
     // Parallel: async spawn returns quickly; wait/collect still share the same tool.

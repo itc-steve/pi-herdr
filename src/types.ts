@@ -16,6 +16,13 @@ export interface CatalogEntry {
   local?: boolean;
 }
 
+export interface WorkerConfig extends CatalogEntry {
+  description: string;
+  maxConcurrent: number;
+  /** Workers sharing a subscription share this concurrency group. */
+  group: string;
+}
+
 export type ResultDelivery = "pointer" | "full";
 
 export interface LocalConfig {
@@ -45,6 +52,7 @@ export interface HerdConfig {
   sessionPolicy: SessionPolicy;
   maxModelConcurrent: number; // local seats AND per exact provider/model string
   local: LocalConfig;
+  workers: Record<string, WorkerConfig>;
   /** Extra non-local do models. Bare role=do prefers local; extras only when local seats are full. */
   do: CatalogEntry[];
   /** Ordered frontier rank. Index 0 = best. */

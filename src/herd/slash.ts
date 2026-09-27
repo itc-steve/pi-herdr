@@ -1,6 +1,6 @@
 import type { HerdActionParams } from "./actions.ts";
 
-export const HERD_SLASH_HELP = `herd — Pi subagent herd (default-local, optional think)
+export const HERD_SLASH_HELP = `herd — agent-chosen workers, queued tasks
 
   /herd help
   /herd models
@@ -10,17 +10,19 @@ export const HERD_SLASH_HELP = `herd — Pi subagent herd (default-local, option
   /herd run use <id>
   /herd run show <id>
   /herd journal
-  /herd spawn task="…" output=file.md [role=think] [model=…] [owns=…] [private=true]
-
-Roles:
-  (omit) / do — local implementer (default)
-  think       — ranked frontier catalog (review / plan / VERIFY)
+  /herd spawn worker=local|grok|codex task="…" output=file.md [owns=…] [after=jobId,…]
+  /herd spawn private=true task="…" output=private.md [owns=…]
+  /herd accept jobId=…
+  /herd peers [run=…]
+  /herd message jobId=… text="…"
+  /herd messages [run=…]
 
 Rules:
-  - role is optional; missing = local do
-  - async spawn requires output=
-  - multi-writer needs disjoint owns= (plan Parallel lanes first)
-  - private=true forces local do (secret-dependent ops; needs "private": { "enabled": true })
+  - choose worker= (herd models lists choices), or exact model=; no default
+  - async spawn requires unique output=; queues return immediately
+  - owns= permits project edits; omit for report-only. Conflicts wait.
+  - after= requires parent acceptance of dependencies, not just completion
+  - private=true forces local for customer data, PII, or secrets; requires private.enabled
   - use herdr tool to view/focus panes — not to assign jobs
 `;
 
@@ -63,6 +65,10 @@ export function parseHerdSlashArgs(args: string): HerdActionParams {
   }
 
   if (
+    head === "accept" ||
+    head === "peers" ||
+    head === "message" ||
+    head === "messages" ||
     head === "steer" ||
     head === "abort" ||
     head === "wait" ||
@@ -106,14 +112,20 @@ function tokenize(input: string): string[] {
   return out;
 }
 
-function parseKv(tokens: string[]): Record<string, string | boolean> {
-  const out: Record<string, string | boolean> = {};
+function parseKv(tokens: string[]): Record<string, string | boolean | number> {
+  const out: Record<string, string | boolean | number> = {};
   for (const tok of tokens) {
     const eq = tok.indexOf("=");
     if (eq <= 0) continue;
     const key = tok.slice(0, eq);
     const val = tok.slice(eq + 1);
-    if (val === "true") out[key] = true;
+    if (key === "timeoutMs") {
+      const value = Number(val);
+      if (!Number.isSafeInteger(value) || value < 1) throw new Error("timeoutMs must be a positive integer");
+      out[key] = value;
+    }
+    else if (key === "text") out[key] = val;
+    else if (val === "true") out[key] = true;
     else if (val === "false") out[key] = false;
     else out[key] = val;
   }
@@ -139,12 +151,16 @@ function items(
 
 const BASE_SUBCOMMANDS: HerdSlashCompletion[] = items([
   { value: "help", description: "Show usage" },
-  { value: "models", description: "Catalog + local stream seats" },
+  { value: "models", description: "Named workers, capabilities, and concurrency" },
   { value: "status", description: "Active monitors / locks" },
   { value: "run", description: "Handoff folders create|list|use|show" },
   { value: "journal", description: "Completed jobs in active run" },
-  { value: "spawn", description: "task= + output= [role=think]" },
+  { value: "spawn", description: "worker= + task= + output= [owns=] [after=]" },
+  { value: "accept", description: "Accept verified result; release dependents" },
   { value: "steer", description: "Nudge a running job" },
+  { value: "peers", description: "Discover this run's mailbox workers" },
+  { value: "message", description: "jobId=… text=… — advisory peer note" },
+  { value: "messages", description: "Recent notes and delivery status [run=…]" },
   { value: "abort", description: "Cancel job(s)" },
   { value: "wait", description: "Block until job idle" },
   { value: "collect", description: "Read reply/artifact" },
@@ -186,19 +202,24 @@ export function getHerdSlashCompletions(
   if (first === "spawn") {
     return items([
       {
-        value: 'task="" output=',
-        label: "spawn local do …",
-        description: "Default: local implementer",
+        value: 'worker=local task="" output=',
+        label: "spawn local …",
+        description: "Small bounded tasks, queued at local capacity",
       },
       {
-        value: 'role=think task="" output=',
-        label: "spawn think …",
-        description: "Ranked frontier review/plan/VERIFY",
+        value: 'worker=codex task="" output=',
+        label: "spawn Codex …",
+        description: "Implementation, investigation, or review",
+      },
+      {
+        value: 'worker=grok task="" output=',
+        label: "spawn Grok …",
+        description: "Implementation, investigation, or review",
       },
       {
         value: 'private=true task="" output=',
         label: "spawn private local …",
-        description: "Secret-dependent op; local do only",
+        description: "Customer information, PII, or secrets; sanitized results only",
       },
     ]);
   }

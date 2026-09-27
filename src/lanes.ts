@@ -13,6 +13,9 @@ export function normalizeLanePath(raw: string): string {
   if (!p) {
     throw new LaneError("Empty path in owns=/forbid=");
   }
+  if (/[*?]/.test(p)) {
+    throw new LaneError(`Lane path '${raw}' must be a literal file or directory, not a glob.`);
+  }
   if (p.startsWith("/") || p.startsWith("~/") || p === "~") {
     throw new LaneError(
       `Lane path '${raw}' must be project-relative (no absolute or '~/').`,
