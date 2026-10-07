@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-labelledby="bt bd">
+  <title id="bt">Pi Herdr — delegate work to named model workers</title>
+  <desc id="bd">The main agent spawns tasks onto named worker lanes. Each worker runs as its own Pi session in a Herdr terminal, shown with running and queued statuses.</desc>
+
+  <defs>
+    <clipPath id="lane-bar-1"><rect x="990" y="168" width="126" height="8" rx="4"/></clipPath>
+    <clipPath id="lane-bar-2"><rect x="990" y="230" width="126" height="8" rx="4"/></clipPath>
+    <clipPath id="lane-bar-3"><rect x="990" y="292" width="126" height="8" rx="4"/></clipPath>
+  </defs>
+
+  <rect width="1200" height="340" rx="24" fill="#0B0E14"/>
+
+  <g id="title-block" transform="translate(56 56)">
+    <text font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#8A93A6">&#62; PI EXTENSION · MULTI-MODEL WORKERS</text>
+    <text y="64" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', PingFang SC, sans-serif" font-size="72" font-weight="700" fill="#F2F5FA">Pi Herdr</text>
+    <text y="110" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', PingFang SC, sans-serif" font-size="23" fill="#C7CEDC">The agent picks a named worker per task; it runs as its</text>
+    <text y="140" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', PingFang SC, sans-serif" font-size="23" fill="#C7CEDC">own Pi session in a Herdr terminal — visible and steerable.</text>
+    <text y="184" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#8A93A6">MIT · Node 22.19+</text>
+  </g>
+
+  <g id="system-map">
+    <!-- parent node -->
+    <rect x="712" y="56" width="436" height="54" rx="12" fill="#141926" stroke="#263044"/>
+    <circle cx="740" cy="83" r="6" fill="#4FD6A6"/>
+    <text x="758" y="90" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19" fill="#F2F5FA">main agent · /herd spawn</text>
+
+    <!-- branches -->
+    <path d="M930 110 L930 132 M768 132 L1092 132 M768 132 L768 148 M930 132 L930 148 M1092 132 L1092 148" fill="none" stroke="#263044" stroke-width="2"/>
+
+    <!-- lane 1: local running -->
+    <rect x="712" y="150" width="436" height="44" rx="10" fill="#141926" stroke="#263044"/>
+    <circle cx="736" cy="172" r="6" fill="#4FD6A6"/>
+    <text x="754" y="179" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19" fill="#F2F5FA">local · running</text>
+    <rect x="990" y="168" width="126" height="8" rx="4" fill="#263044"/>
+    <rect x="990" y="168" width="86" height="8" rx="4" fill="#4FD6A6"/>
+
+    <!-- lane 2: grok running -->
+    <rect x="712" y="212" width="436" height="44" rx="10" fill="#141926" stroke="#263044"/>
+    <circle cx="736" cy="234" r="6" fill="#4FD6A6"/>
+    <text x="754" y="241" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19" fill="#F2F5FA">grok · running</text>
+    <rect x="990" y="230" width="126" height="8" rx="4" fill="#263044"/>
+    <rect x="990" y="230" width="44" height="8" rx="4" fill="#4FD6A6"/>
+
+    <!-- lane 3: codex queued -->
+    <rect x="712" y="274" width="436" height="44" rx="10" fill="#141926" stroke="#263044"/>
+    <circle cx="736" cy="296" r="6" fill="#8A93A6"/>
+    <text x="754" y="303" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19" fill="#C7CEDC">codex · queued</text>
+    <rect x="990" y="292" width="126" height="8" rx="4" fill="#263044"/>
+  </g>
+</svg>

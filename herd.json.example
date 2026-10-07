@@ -1,0 +1,23 @@
+{
+  "workers": {
+    "local": {
+      "model": "local-provider/local-model",
+      "thinking": "medium",
+      "maxConcurrent": 2,
+      "description": "Small tasks with clear checks; private customer data, PII, and secrets."
+    },
+    "grok": {
+      "model": "grok-provider/grok-model",
+      "thinking": "medium",
+      "maxConcurrent": 1,
+      "description": "Implementation, investigation, or independent review."
+    },
+    "codex": {
+      "model": "openai-codex/codex-model",
+      "thinking": "medium",
+      "maxConcurrent": 1,
+      "description": "Implementation, investigation, or independent review."
+    }
+  },
+  "private": { "enabled": false }
+}
