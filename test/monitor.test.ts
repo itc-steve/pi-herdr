@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHerdMonitor } from "../src/herd/monitor.ts";
+import type { HerdrClient } from "../src/herdr/client.ts";
+import type { JobHandle } from "../src/herd/boot.ts";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 describe("createHerdMonitor abort", () => {
   it("rejects a queued slot reservation instead of starting it later", async () => {
@@ -28,6 +33,111 @@ describe("createHerdMonitor abort", () => {
     assert.equal(outcome, "rejected");
     assert.equal(monitor.modelInUse("test/model"), 0);
   });
+});
+
+describe("live blocked state", () => {
+  it("notifies once per transition and clears on resume, release and cancellation", async () => {
+    const notified: string[] = [];
+    let changes = 0;
+    const m = createHerdMonitor({
+      getMaxConcurrent: () => 1, herdr: () => null, onComplete: () => {},
+      onChange: () => { changes++; },
+      onBlocked: (job, pane) => notified.push(`${job}/${pane}`),
+    });
+    const ticket = await m.reserveSlot(undefined, { model: "test/model", jobId: "j1" });
+    const before = changes;
+    m.setPaneStatus("j1", "p1", "blocked");
+    m.setPaneStatus("j1", "p1", "blocked");
+    assert.deepEqual(m.blockedJobs(), [{ jobId: "j1", paneId: "p1" }]);
+    assert.equal(changes, before + 1);
+    assert.equal(m.listJobs()[0]!.status, "running");
+    m.setPaneStatus("j1", "p1", "working");
+    assert.deepEqual(m.blockedJobs(), []);
+    m.setPaneStatus("j1", "p1", "blocked");
+    m.abort({ jobId: "j1" });
+    assert.deepEqual(m.blockedJobs(), []);
+    assert.equal(m.modelInUse("test/model"), 1);
+    m.setPaneStatus("j1", "p1", "blocked");
+    m.releaseTicket(ticket);
+    assert.deepEqual(m.blockedJobs(), []);
+    assert.deepEqual(notified, ["j1/p1", "j1/p1", "j1/p1"]);
+  });
+
+  it("clears blocked state before completion and releases only after mailbox/output readiness", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "herdr-monitor-"));
+    const sessionFile = join(dir, "session.jsonl");
+    const outputPath = join(dir, "result.md");
+    writeFileSync(sessionFile, JSON.stringify({ type: "message", message: {
+      role: "assistant", content: [{ type: "text", text: "complete" }], stopReason: "stop",
+    } }) + "\n");
+    writeFileSync(outputPath, "complete");
+    let finish!: () => void;
+    const finished = new Promise<void>(resolve => { finish = resolve; });
+    let reads = 0;
+    const client = {
+      getPaneInfo: async () => ({ agent: "pi", agent_status: ++reads === 1 ? "blocked" : "done" }),
+      waitAgentStatus: async () => {},
+    } as unknown as HerdrClient;
+    const m = createHerdMonitor({ getMaxConcurrent: () => 1, herdr: () => client,
+      onComplete: event => {
+        assert.equal(event.status, "done");
+        assert.deepEqual(m.blockedJobs(), []);
+        finish();
+      } });
+    try {
+      const ticket = await m.reserveSlot(undefined, { model: "test/model", jobId: "j1" });
+      m.attachAndWatch({ ticketId: ticket, handle: { jobId: "j1", paneId: "p1", model: "test/model",
+        taskPreview: "test", sessionFile, watermark: 0, outputPath } as JobHandle,
+        mailboxFinished: () => true });
+      await finished;
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(m.modelInUse("test/model"), 0);
+    } finally { m.dispose(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  for (const cleanupFails of [false, true]) {
+    it(`holds reservations until timeout cleanup succeeds (cleanupFails=${cleanupFails})`, async () => {
+      let monitoring = true;
+      let closeStarted!: () => void;
+      const closing = new Promise<void>(resolve => { closeStarted = resolve; });
+      let allowClose!: () => void;
+      const closeGate = new Promise<void>(resolve => { allowClose = resolve; });
+      let completed = false;
+      const client = {
+        getPaneInfo: async () => {
+          if (!monitoring) throw new Error("stop unavailable");
+          return { agent: "pi", agent_status: "blocked" };
+        },
+        waitAgentStatus: async () => {
+          monitoring = false;
+          throw new Error("connection lost");
+        },
+        closePane: async () => {
+          closeStarted();
+          await closeGate;
+          if (cleanupFails) throw new Error("close unavailable");
+        },
+      } as unknown as HerdrClient;
+      const m = createHerdMonitor({ getMaxConcurrent: () => 1, herdr: () => client,
+        onComplete: () => { completed = true; } });
+      const ticket = await m.reserveSlot(undefined, { model: "test/model", jobId: "j1", owns: ["src/a.ts"] });
+      m.attachAndWatch({ ticketId: ticket, handle: {
+        jobId: "j1", paneId: "p1", model: "test/model", taskPreview: "test", owns: ["src/a.ts"],
+      } as JobHandle, timeoutMs: 10 });
+      await closing;
+      assert.equal(m.modelInUse("test/model"), 1);
+      assert.equal(m.inFlightLaneClaims().length, 1);
+      assert.equal(completed, false);
+      allowClose();
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(m.modelInUse("test/model"), cleanupFails ? 1 : 0);
+      assert.equal(m.inFlightLaneClaims().length, cleanupFails ? 1 : 0);
+      assert.equal(completed, !cleanupFails);
+      assert.deepEqual(m.blockedJobs(), []);
+      m.releaseTicket(ticket);
+      m.dispose();
+    });
+  }
 });
 
 describe("claimDoPick", () => {

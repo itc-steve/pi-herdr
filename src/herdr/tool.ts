@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail } from "@earendil-works/pi-coding-agent";
-import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { resolvePaneRefByLabel, resolveTabRef, resolveWorkspaceRef } from "./resolve.ts";
@@ -37,7 +36,7 @@ interface HerdrToolDetails {
 	[key: string]: unknown;
 }
 
-const ActionEnum = StringEnum(
+const ActionEnum = Type.Enum(
 	[
 		"list",
 		"current",
@@ -72,44 +71,52 @@ const ActionEnum = StringEnum(
 		"worktree_open",
 		"worktree_remove",
 	] as const,
-	{ description: "Action to perform" },
+	{ type: "string", description: "Action to perform" },
 );
 
-const StatusEnum = StringEnum(["idle", "working", "blocked", "done", "unknown"] as const, {
+const StatusEnum = Type.Enum(["idle", "working", "blocked", "done", "unknown"] as const, {
+	type: "string",
 	description: "Agent status to wait for",
 });
 
-const SourceEnum = StringEnum(["visible", "recent", "recent-unwrapped", "detection"] as const, {
+const SourceEnum = Type.Enum(["visible", "recent", "recent-unwrapped", "detection"] as const, {
+	type: "string",
 	description: "Read source for read/watch; detection is valid for read only",
 });
 
-const DirectionEnum = StringEnum(["right", "down"] as const, {
+const DirectionEnum = Type.Enum(["right", "down"] as const, {
+	type: "string",
 	description: "Split direction for pane_split / pane_move. When omitted for pane_split, Herdr chooses from the source pane geometry.",
 });
 
-const ZoomModeEnum = StringEnum(["toggle", "on", "off"] as const, {
+const ZoomModeEnum = Type.Enum(["toggle", "on", "off"] as const, {
+	type: "string",
 	description: "Zoom mode for pane_zoom (default toggle)",
 });
 
-const MoveTargetEnum = StringEnum(["tab", "new-tab", "new-workspace"] as const, {
+const MoveTargetEnum = Type.Enum(["tab", "new-tab", "new-workspace"] as const, {
+	type: "string",
 	description: "Where pane_move sends the pane",
 });
 
-const ListScopeEnum = StringEnum(["current", "workspace", "all"] as const, {
+const ListScopeEnum = Type.Enum(["current", "workspace", "all"] as const, {
+	type: "string",
 	description:
 		"list scope: current (caller workspace, default), workspace (requires workspace id/label), or all (every space — use to inspect terminals outside the herd)",
 });
 
-const WaitModeEnum = StringEnum(["all", "any"] as const, {
+const WaitModeEnum = Type.Enum(["all", "any"] as const, {
+	type: "string",
 	description: "How multi-pane waits should resolve",
 });
 
-const NotifyPositionEnum = StringEnum(
+const NotifyPositionEnum = Type.Enum(
 	["top-left", "top-right", "bottom-left", "bottom-right"] as const,
-	{ description: "Notification corner" },
+	{ type: "string", description: "Notification corner" },
 );
 
-const NotifySoundEnum = StringEnum(["none", "done", "request"] as const, {
+const NotifySoundEnum = Type.Enum(["none", "done", "request"] as const, {
+	type: "string",
 	description: "Notification sound",
 });
 
@@ -1443,6 +1450,9 @@ export function registerHerdrTool(pi: ExtensionAPI): void {
 				}
 				case "read": {
 					let text = theme.fg("accent", `📄 ${details.pane}`);
+					if (!expanded && result.content?.some((block) => block.type === "text" && block.text)) {
+						text += theme.fg("dim", ` (${context.keyHint("app.tools.expand", "to expand")})`);
+					}
 					if (expanded) {
 						const content = result.content?.[0];
 						if (content?.type === "text") {

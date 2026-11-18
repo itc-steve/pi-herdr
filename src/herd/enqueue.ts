@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { createMailbox } from "./mailbox.ts";
 import type { HerdRuntime, HerdActionParams } from "./actions.ts";
-import { resolveWorker } from "../workers.ts";
+import { preflightModel, resolveWorker } from "../workers.ts";
 import { assertLaneAvailable, parsePathList } from "../lanes.ts";
 import { assertOutputName, ensureJobSessionFile, resolveHandoffPath } from "../handoff.ts";
 import { nextJobId, requireActiveOrRef } from "../runs.ts";
@@ -16,7 +16,10 @@ export async function enqueueSpawn(runtime: HerdRuntime, params: HerdActionParam
   signal?.throwIfAborted();
   if (params.timeoutMs !== undefined && (!Number.isSafeInteger(params.timeoutMs) || params.timeoutMs < 1)) throw new Error("timeoutMs must be a positive integer");
   const config = runtime.getConfig();
-  const worker = resolveWorker(config, params);
+  const selected = resolveWorker(config, params);
+  const thinking = preflightModel(selected.model, selected.thinking, runtime.modelRegistry);
+  const worker = { ...selected, thinking };
+  const adjustment = thinking === selected.thinking ? "" : `Thinking adjusted: ${selected.thinking} → ${thinking} for ${worker.model}.\n`;
   const task = params.task?.trim();
   if (!task) throw new Error("task is required");
   if (config.private.enabled && !params.private && [task, params.reads ?? ""].some(hasPrivateMarker)) throw new Error("Private marker found; retry with private=true.");
@@ -66,21 +69,32 @@ export async function enqueueSpawn(runtime: HerdRuntime, params: HerdActionParam
   });
   if (params.waitForReply) {
     // Cancellation of a waiting parent does not cancel an already admitted background job.
-    await waitForQueuedJob(job.finished, params.timeoutMs, signal);
-    return { text: `Job ${jobId}: ${job.status}\n${runtime.sanitizeForCloud?.(job.error ?? "") ?? job.error ?? ""}\n${outputPath ? `output=${outputPath}` : (job.result as { text?: string })?.text ?? ""}`, details: { jobId, status: job.status, outputPath } };
+    const finishedInTime = await waitForQueuedJob(job.finished, params.timeoutMs, signal);
+    if (!finishedInTime) {
+      return { text: `${adjustment}Job ${jobId} still ${job.status} after ${params.timeoutMs ?? 600_000}ms; it keeps running in the background. When ready, herd wait jobId=${jobId} with a larger timeoutMs (or omit it for the 10-minute default).`, details: { jobId, status: job.status, outputPath, thinking, requestedThinking: selected.thinking, timedOut: true } };
+    }
+    return { text: `${adjustment}Job ${jobId}: ${job.status}\n${runtime.sanitizeForCloud?.(job.error ?? "") ?? job.error ?? ""}\n${outputPath ? `output=${outputPath}` : (job.result as { text?: string })?.text ?? ""}`, details: { jobId, status: job.status, outputPath, thinking, requestedThinking: selected.thinking } };
   }
   return {
-    text: `Queued ${jobId} · worker=${worker.name} · ${worker.model}:${worker.thinking}\n${owns.length ? `owns=${owns.join(",")}` : "Report-only (no project edits)"}${after.length ? `\nafter=${after.join(",")} (parent acceptance required)` : ""}\n${outputPath ? `output=${outputPath}\n` : ""}Completion will be reported. Read the result, verify it, then herd accept jobId=${jobId}.`,
-    details: { jobId, status: job.status, worker: worker.name, outputPath },
+    text: `${adjustment}Queued ${jobId} · worker=${worker.name} · ${worker.model}:${worker.thinking}\n${owns.length ? `owns=${owns.join(",")}` : "Report-only (no project edits)"}${after.length ? `\nafter=${after.join(",")} (parent acceptance required)` : ""}\n${outputPath ? `output=${outputPath}\n` : ""}Completion will be reported. Read the result, verify it, then herd accept jobId=${jobId}.`,
+    details: { jobId, status: job.status, worker: worker.name, outputPath, thinking, requestedThinking: selected.thinking },
   };
 }
 
 export async function waitForQueuedJob(finished: Promise<void>, timeoutMs = 600_000, signal?: AbortSignal) {
   const combined = AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])]);
   combined.throwIfAborted();
-  await new Promise<void>((resolve, reject) => {
-    const abort = () => reject(combined.reason);
-    combined.addEventListener("abort", abort, { once: true });
-    void finished.then(() => { combined.removeEventListener("abort", abort); resolve(); });
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => reject(combined.reason);
+      combined.addEventListener("abort", abort, { once: true });
+      void finished.then(() => { combined.removeEventListener("abort", abort); resolve(); });
+    });
+    return true;
+  } catch (err) {
+    // Budget expiry is a state, not a failure: the job keeps running in the background.
+    // Only a caller-signal abort (user Esc) stays a hard rejection.
+    if (signal?.aborted) throw err;
+    return false;
+  }
 }

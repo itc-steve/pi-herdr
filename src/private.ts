@@ -1,6 +1,7 @@
 // Vendored/adapted from @spences10/pi-redact (Scott Spence, MIT)
 // https://github.com/spences10/my-pi/tree/main/packages/pi-redact
 // Patterns from https://github.com/spences10/nopeek
+// Extra prefixes from https://github.com/kslamph/pi-secret
 
 import { resolve } from "node:path";
 
@@ -19,13 +20,22 @@ export type RedactionOptions = {
   forcePrivateKey?: boolean;
 };
 
-const PRIVATE_KEY_BEGIN_PATTERN =
-  /-----BEGIN[ \t]+[\w -]*PRIVATE[ \t]+KEY-----/;
-const PRIVATE_KEY_END_PATTERN = /-----END[ \t]+[\w -]*PRIVATE[ \t]+KEY-----/;
+// Accept numbered search/read output, but not delimiters embedded in source expressions.
+const PRIVATE_KEY_LINE_PREFIX = String.raw`[ \t]*(?:(?:[^\r\n]+:)?\d+:|(?:[^\r\n]+-)?\d+-|\d+[ \t]+)?[ \t]*`;
+const PRIVATE_KEY_BEGIN_PATTERN = new RegExp(
+  String.raw`^${PRIVATE_KEY_LINE_PREFIX}-----BEGIN[ \t]+[\w -]*PRIVATE[ \t]+KEY-----[ \t]*\r?$`, "m",
+);
+const PRIVATE_KEY_END_PATTERN = new RegExp(
+  String.raw`^${PRIVATE_KEY_LINE_PREFIX}-----END[ \t]+[\w -]*PRIVATE[ \t]+KEY-----[ \t]*\r?$`, "m",
+);
 
 const SECRET_PATTERNS: SecretPattern[] = [
   { name: "AWS Access Key", pattern: /AKIA[A-Z0-9]{16}/g },
   { name: "AWS Temp Access Key", pattern: /ASIA[A-Z0-9]{16}/g },
+  {
+    name: "AWS Identifier",
+    pattern: /\b(?:AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b/g,
+  },
   {
     name: "AWS Secret Key",
     pattern:
@@ -48,6 +58,10 @@ const SECRET_PATTERNS: SecretPattern[] = [
     pattern: /sk_test_[a-zA-Z0-9]{20,}/g,
   },
   {
+    name: "Stripe Restricted Key",
+    pattern: /rk_(?:live|test)_[0-9A-Za-z]{16,}/g,
+  },
+  {
     name: "Hetzner Token",
     pattern:
       /(?:HCLOUD_TOKEN|hcloud_token|token)\s*[:=]\s*["']?[a-f0-9]{64}\b/g,
@@ -55,7 +69,9 @@ const SECRET_PATTERNS: SecretPattern[] = [
   {
     name: "Private Key",
     pattern:
-      /-----BEGIN[ \t]+[\w -]*PRIVATE[ \t]+KEY-----[\s\S]*?(?:-----END[ \t]+[\w -]*PRIVATE[ \t]+KEY-----|$)/g,
+      new RegExp(
+        String.raw`${PRIVATE_KEY_BEGIN_PATTERN.source}(?:[\s\S]*?${PRIVATE_KEY_END_PATTERN.source}|[\s\S]*$(?![\s\S]))`, "gm",
+      ),
   },
   {
     name: "Connection String with Password",
@@ -69,6 +85,10 @@ const SECRET_PATTERNS: SecretPattern[] = [
   {
     name: "Tavily API Key",
     pattern: /tvly-[a-zA-Z0-9_-]{20,}/g,
+  },
+  {
+    name: "JWT",
+    pattern: /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
   },
   {
     name: "Kagi API Key",
@@ -91,10 +111,6 @@ const SECRET_PATTERNS: SecretPattern[] = [
     pattern: /github_pat_[a-zA-Z0-9_]{20,}/g,
   },
   {
-    name: "JWT",
-    pattern: /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
-  },
-  {
     name: "Slack Token",
     pattern: /xox[baprs]-[A-Za-z0-9-]{20,}/g,
   },
@@ -113,6 +129,27 @@ const SECRET_PATTERNS: SecretPattern[] = [
   {
     name: "SendGrid API Key",
     pattern: /SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{32,}/g,
+  },
+  {
+    name: "Docker PAT",
+    pattern: /dckr_pat_[A-Za-z0-9_-]{20,}/g,
+  },
+  {
+    name: "HuggingFace Token",
+    pattern: /\bhf_[A-Za-z0-9]{20,}\b/g,
+  },
+  {
+    name: "PyPI Token",
+    pattern: /pypi-Po-[A-Za-z0-9]{20,}/g,
+  },
+  {
+    name: "CLI Secret Flag",
+    pattern:
+      /(?<![\w-])--?(?:password|passwd|pwd|pass|token|api-?key|secret)(?:=|[ \t]+)["']?[^\s"'\n]{3,}/gi,
+  },
+  {
+    name: "CLI Basic Auth",
+    pattern: /(?<![\w-])(?:-u|--user)[ \t]+['"]?[^\s:'"]+:["']?[^\s'"]{3,}/g,
   },
 ];
 
@@ -250,7 +287,15 @@ function redactSecretFields(text: string): RedactionResult {
   UNQUOTED_SECRET_FIELD_PATTERN.lastIndex = 0;
   result = result.replace(
     UNQUOTED_SECRET_FIELD_PATTERN,
-    (match, boundary: string, assignment: string, value: string) => {
+    (match, boundary: string, assignment: string, value: string, offset: number) => {
+      // Unquoted JS/TS expressions are references, not credential values.
+      // Keep this contextual: dotted values in env/config files can be secrets.
+      const lineStart = result.lastIndexOf("\n", offset - 1) + 1;
+      const prefix = result.slice(lineStart, offset) + boundary;
+      const sourceContext = /[:{,;]|\b(?:const|let|var|return)\b/.test(prefix) ||
+        assignment.includes(":");
+      const expression = /^(?:[A-Za-z_$][\w$]*(?:[.?![(])|(?:await|new)\b)/.test(value);
+      if (sourceContext && expression) return match;
       if (value.includes(PRIVATE_MARKER) || value.includes("[REDACTED:")) {
         return match;
       }

@@ -299,9 +299,10 @@ export function defaultConfigObject(): Record<string, unknown> {
   return {
     sessionDir: DEFAULT_SESSION_DIR,
     workers: {
-      local: { model: DEFAULT_LOCAL_MODEL, thinking: "medium", maxConcurrent: 2, preflight: true, description: "Small bounded tasks; private customer information, PII, and secrets." },
-      grok: { model: "grok-cli/grok-4.6", thinking: "medium", maxConcurrent: 1, group: "grok", description: "General-purpose implementation, investigation, or review." },
-      codex: { model: "openai-codex/gpt-5.6-sol", thinking: "medium", maxConcurrent: 1, group: "codex", description: "General-purpose implementation, investigation, or review." },
+      local: { model: DEFAULT_LOCAL_MODEL, thinking: "medium", maxConcurrent: 2, preflight: true, description: "Small bounded tasks with explicit checks; private customer data, PII, and secrets stay local. Always use medium thinking; never override it. Avoid broad implementation without a precise plan." },
+      grok: { model: "grok-cli/grok-4.6", thinking: "medium", maxConcurrent: 1, group: "grok", description: "Research, document analysis, and independent critique from another provider. Use medium normally and high for difficult analysis or independent critique. Verify current claims against sources." },
+      codex: { model: "openai-codex/gpt-6.1-sol", thinking: "medium", maxConcurrent: 1, group: "codex", description: "Implementation, debugging, refactoring, and tests. Use medium for normal coding, low for mechanical edits, high for difficult implementation. Prefer Astra for exceptional unresolved reasoning problems." },
+      astra: { model: "openai-codex/gpt-6-astra", thinking: "medium", maxConcurrent: 1, group: "codex", description: "Difficult root-cause analysis, ambiguous architecture, and high-consequence decisions or reviews. Can implement directly when that avoids a handoff. Use medium normally, high for difficult work, and xhigh only for exceptional unresolved problems where extra usage and latency are justified. Do not use xhigh for routine coding, broad scans, or missing requirements." },
     },
     private: { enabled: false },
     defaults: {

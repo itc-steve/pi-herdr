@@ -10,7 +10,8 @@ import {
 import type { HerdrClient } from "../src/herdr/client.ts";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import {
   parseHerdSlashArgs,
   HerdSlashHelpError,
@@ -18,12 +19,28 @@ import {
 } from "../src/herd/slash.ts";
 import { spawnJob, type SpawnParams } from "../src/herd/spawn.ts";
 import { buildHandoffKick } from "../src/handoff.ts";
-import { parseHerdConfig, defaultConfigObject } from "../src/config.ts";
+import { parseHerdConfig, defaultConfigObject, shellQuote } from "../src/config.ts";
 import { pickDoEntry } from "../src/resolve-model.ts";
 import { createLocalStreamLock } from "../src/local-lock.ts";
 import { createHerdState } from "../src/state.ts";
 import { createRun } from "../src/runs.ts";
 import type { HerdMonitor } from "../src/herd/monitor.ts";
+
+function inspectLaunch(command: string) {
+  const keys = ["PI_HERD_WORKER", "PI_HERD_PRIVATE", "PI_HERD_ROOT", "PI_HERD_OWNS", "PI_HERD_FORBID", "PI_HERD_OUTPUT", "PI_HERD_MAILBOX", "PI_HERD_JOB", "PI_CODING_AGENT_SESSION_DIR", "PI_PROGRAM_STATUS"];
+  const script = `console.log(JSON.stringify({argv:process.argv.slice(1),env:Object.fromEntries(${JSON.stringify(keys)}.map(k=>[k,process.env[k]]))}))`;
+  // Execute only an inert Node stand-in, not Pi; the shell still parses the real launch.
+  return JSON.parse(execFileSync("/bin/sh", ["-c", command.replace(" pi --model", ` ${shellQuote(process.execPath)} -e ${shellQuote(script)} -- --model`)], {
+    encoding: "utf8",
+    env: {
+      PATH: process.env.PATH,
+      PI_HERD_PRIVATE: "1", PI_HERD_WORKER: "stale", PI_HERD_ROOT: "/stale",
+      PI_HERD_OWNS: '["stale"]', PI_HERD_FORBID: '["stale"]', PI_HERD_OUTPUT: "/stale/report.md",
+      PI_HERD_MAILBOX: "/stale/mailbox", PI_HERD_JOB: "stale",
+      PI_CODING_AGENT_SESSION_DIR: "/stale/sessions", PI_PROGRAM_STATUS: "0",
+    },
+  })) as { argv: string[]; env: Record<string, string | undefined> };
+}
 
 describe("boot helpers", () => {
   it("detects shell prompts", () => {
@@ -173,6 +190,7 @@ describe("spawn lifecycle", () => {
     } as unknown as HerdrClient;
 
     let watched: Record<string, unknown> | undefined;
+    const observedStatuses: string[] = [];
     const monitor = {
       inFlightLaneClaims: () => [],
       reserveSlot: async () => "slot-1",
@@ -183,6 +201,11 @@ describe("spawn lifecycle", () => {
         queued: false,
       }),
       releaseThinkHold: () => {},
+      setPaneStatus: (jobId: string, paneId: string, status: string) => {
+        assert.equal(jobId, "j01");
+        assert.equal(paneId, "w1:p2");
+        observedStatuses.push(status);
+      },
       attachAndWatch: (opts: Record<string, unknown>) => {
         watched = opts;
         return {};
@@ -203,6 +226,7 @@ describe("spawn lifecycle", () => {
     });
 
     assert.ok(watched);
+    assert.ok(observedStatuses.includes("idle"));
     assert.equal("parentSignal" in watched, false);
     localLock.release("j01");
   });
@@ -275,7 +299,7 @@ describe("private spawn contract", () => {
   };
 
   function spawnHarness(privateEnabled: boolean): Harness {
-    const sessionDir = mkdtempSync(join(tmpdir(), "herd-pvt-"));
+    const sessionDir = mkdtempSync(join(tmpdir(), "herd-pvt-' space-"));
     const defaults = defaultConfigObject();
     const config = parseHerdConfig({
       ...defaults,
@@ -342,6 +366,7 @@ describe("private spawn contract", () => {
           load: () => 0,
         }),
       releaseThinkHold: () => {},
+      setPaneStatus: () => {},
       attachAndWatch: () => ({}),
       releaseTicket: () => {},
     } as unknown as HerdMonitor;
@@ -497,10 +522,57 @@ describe("private spawn contract", () => {
       spawnOpts(h, { task: "rotate the token", output: "o.md", private: true }),
     );
     assert.equal(h.createTabCalls(), 1);
-    assert.ok(
-      h.bootedCmds().some((c) => c.startsWith("env PI_HERD_PRIVATE=1 pi --model")),
-    );
+    const command = h.bootedCmds().find(c => c.includes("pi --model"))!;
+    assert.ok(command.startsWith("env -u PI_HERD_PRIVATE"));
+    const { env, argv } = inspectLaunch(command);
+    assert.equal(env.PI_HERD_WORKER, "1");
+    assert.equal(env.PI_HERD_PRIVATE, "1");
+    assert.equal(env.PI_PROGRAM_STATUS, "1");
+    assert.equal(env.PI_CODING_AGENT_SESSION_DIR, dirname(res.handle!.sessionFile));
+    assert.equal(argv[argv.indexOf("--session") + 1], res.handle!.sessionFile);
+    assert.equal(env.PI_HERD_ROOT, process.cwd());
+    assert.equal(env.PI_HERD_OWNS, "[]");
+    assert.equal(env.PI_HERD_FORBID, "[]");
+    assert.equal(env.PI_HERD_OUTPUT, res.handle!.outputPath);
+    assert.equal(env.PI_HERD_MAILBOX, undefined);
+    assert.equal(env.PI_HERD_JOB, undefined);
+    assert.ok(argv.includes("--no-mcp"));
+    assert.match(argv[argv.indexOf("--extension") + 1]!, /\/index\.ts$/);
+    assert.ok(!argv.includes("--no-tools") && !argv.includes("--exclude-tools"));
     assert.equal((res.handle as { private?: boolean } | undefined)?.private, true);
+  });
+
+  it("normal launch quotes policy paths and replaces inherited optional metadata", async () => {
+    const h = spawnHarness(false);
+    const cwd = "project with ' quotes";
+    const owns = ["src/a'b.ts", "space dir"];
+    const forbid = ["locked ' dir/file.ts"];
+    const result = await spawnJob(spawnOpts(h, { task: "t", output: "quoted ' report.md", owns: owns.join(","), forbid: forbid.join(","), cwd }));
+    const command = h.bootedCmds().find(c => c.includes("pi --model"))!;
+    const { env, argv } = inspectLaunch(command);
+    assert.equal(env.PI_HERD_WORKER, "1");
+    assert.equal(env.PI_HERD_PRIVATE, undefined);
+    assert.equal(env.PI_HERD_MAILBOX, undefined);
+    assert.equal(env.PI_HERD_JOB, undefined);
+    assert.equal(env.PI_PROGRAM_STATUS, "1");
+    assert.equal(env.PI_HERD_ROOT, resolve(cwd));
+    assert.deepEqual(JSON.parse(env.PI_HERD_OWNS!), owns);
+    assert.deepEqual(JSON.parse(env.PI_HERD_FORBID!), forbid);
+    assert.equal(env.PI_HERD_OUTPUT, result.handle!.outputPath);
+    assert.equal(env.PI_CODING_AGENT_SESSION_DIR, dirname(result.handle!.sessionFile));
+    assert.equal(argv[argv.indexOf("--session") + 1], result.handle!.sessionFile);
+    assert.match(argv[argv.indexOf("--extension") + 1]!, /\/index\.ts$/);
+    assert.ok(!argv.includes("--no-mcp"));
+  });
+
+  it("report-only launch without an output clears inherited output permissions", async () => {
+    const h = spawnHarness(false);
+    h.config.defaults.requireOutput = false;
+    await spawnJob(spawnOpts(h, { task: "t" }));
+    const { env } = inspectLaunch(h.bootedCmds().find(c => c.includes("pi --model"))!);
+    assert.equal(env.PI_HERD_OUTPUT, undefined);
+    assert.equal(env.PI_HERD_OWNS, "[]");
+    assert.equal(env.PI_HERD_FORBID, "[]");
   });
 
   it("do[] extra spawn reserves its slot with the shared per-model cap (slotMax=1)", async () => {

@@ -33,6 +33,7 @@ describe("private-mode extension wiring", () => {
       },
       registerTool: () => {},
       registerCommand: () => {},
+      registerMessageRenderer: () => {},
       sendMessage: () => {},
     } as unknown as ExtensionAPI;
     const { default: register } = await import("../index.ts");
@@ -45,6 +46,23 @@ describe("private-mode extension wiring", () => {
     assert.ok(toolResult);
     assert.ok(beforeProviderRequest);
     assert.ok(handlers.has("model_select"));
+
+    const beforeAgentStart = handlers.get("before_agent_start");
+    assert.ok(beforeAgentStart);
+    const systemPromptOptions = { promptGuidelines: [] as string[], toolGuidelines: {} };
+    assert.equal(await beforeAgentStart({ systemPrompt: "Original prompt", systemPromptOptions }, {
+      model: { provider: "cloud", id: "model" },
+    }), undefined);
+    const instructions = systemPromptOptions.promptGuidelines.join("\n");
+    assert.match(instructions, /marker means pi-herdr withheld/);
+    assert.match(instructions, /action="spawn", private=true/);
+    assert.match(instructions, /owns=/);
+    assert.match(instructions, /Never copy a marker into code/);
+    assert.match(instructions, /verify and accept/);
+    assert.equal(await beforeAgentStart({ systemPrompt: "Original prompt", systemPromptOptions }, {
+      model: { provider: "vllm", id: "local-test" },
+    }), undefined);
+    assert.equal(systemPromptOptions.promptGuidelines.length, 0);
 
     const secret = "context-secret-value";
     const messages = [
@@ -71,6 +89,8 @@ describe("private-mode extension wiring", () => {
       cloud,
     );
     assert.ok(toolResultValue);
+    assert.match(JSON.stringify(toolResultValue), /small local herd subagent/);
+    assert.match(JSON.stringify(toolResultValue), /sanitized report/);
     assert.ok(!JSON.stringify(toolResultValue).includes(keyBody));
 
     const bashResult = await toolResult(

@@ -5,7 +5,7 @@
 
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { PaneInfo } from "../types.ts";
+import type { AgentStatus, PaneInfo } from "../types.ts";
 import {
   agentDisplayName,
   normalizeStatus,
@@ -17,6 +17,8 @@ import {
   countSessionEntries,
   extractFromScrollback,
   hasUserMessageAfter,
+  getNewEntries,
+  type MessageEntry,
 } from "../readback.ts";
 import { ensureOutputFile } from "../handoff.ts";
 
@@ -55,6 +57,18 @@ export type JobHandle = {
   /** Private (secret-dependent) local do worker. */
   private?: boolean;
 };
+
+export type PaneStatusHandler = (status: AgentStatus) => void;
+
+function statusObserver(onStatus?: PaneStatusHandler): PaneStatusHandler {
+  let previous: AgentStatus | undefined;
+  return (status) => {
+    if (status !== previous) {
+      previous = status;
+      onStatus?.(status);
+    }
+  };
+}
 
 function isAbortError(err: unknown): boolean {
   return (
@@ -178,6 +192,7 @@ async function waitUntilAgentDetected(
   paneId: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  onStatus?: PaneStatusHandler,
 ): Promise<PaneInfo> {
   const deadline = Date.now() + Math.max(1, timeoutMs);
   let last: PaneInfo | null = null;
@@ -185,6 +200,7 @@ async function waitUntilAgentDetected(
     if (signal?.aborted) throw new Error("Aborted");
     last = await herdr.getPaneInfo(paneId, signal);
     if (!last) throw new Error(`Pane ${paneId} disappeared during boot`);
+    onStatus?.(normalizeStatus(last.agent_status));
     if (paneHasAgent(last)) return last;
     await sleep(POLL_MS, signal);
   }
@@ -199,11 +215,13 @@ export async function waitUntilAgentReady(
   paneId: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  onStatus?: PaneStatusHandler,
 ): Promise<PaneInfo> {
   const deadline = Date.now() + Math.max(1, timeoutMs);
   const remaining = () => Math.max(1, deadline - Date.now());
 
-  await waitUntilAgentDetected(herdr, paneId, remaining(), signal);
+  const observe = statusObserver(onStatus);
+  await waitUntilAgentDetected(herdr, paneId, remaining(), signal, observe);
 
   let useNativeWait = typeof herdr.waitAgentStatus === "function";
   let last: PaneInfo | null = null;
@@ -212,16 +230,17 @@ export async function waitUntilAgentReady(
     if (signal?.aborted) throw new Error("Aborted");
     last = await herdr.getPaneInfo(paneId, signal);
     if (!last) throw new Error(`Pane ${paneId} disappeared during boot`);
+    const status = normalizeStatus(last.agent_status);
+    observe(status);
     if (!paneHasAgent(last)) {
       await sleep(POLL_MS, signal);
       continue;
     }
-
-    const status = normalizeStatus(last.agent_status);
     if (isAgentAcceptingInput(status)) {
       await sleep(AGENT_READY_SETTLE_MS, signal);
       const settled = await herdr.getPaneInfo(paneId, signal);
       if (!settled || !paneHasAgent(settled)) continue;
+      observe(normalizeStatus(settled.agent_status));
       if (isAgentAcceptingInput(normalizeStatus(settled.agent_status))) {
         return settled;
       }
@@ -230,11 +249,11 @@ export async function waitUntilAgentReady(
 
     if (useNativeWait) {
       try {
-        await herdr.waitAgentStatus(paneId, "idle", remaining(), signal);
+        await herdr.waitAgentStatus(paneId, "idle", Math.min(POLL_MS, remaining()), signal);
         continue;
       } catch (err) {
         if (signal?.aborted || isAbortError(err)) throw err;
-        if (looksLikeTimeoutError(err)) break;
+        if (looksLikeTimeoutError(err)) continue;
         useNativeWait = false;
       }
     }
@@ -256,6 +275,7 @@ export async function bootIntoPane(opts: {
   label: string;
   timeoutMs: number;
   signal?: AbortSignal;
+  onStatus?: PaneStatusHandler;
 }): Promise<PaneInfo> {
   mkdirSync(dirname(opts.sessionFile), { recursive: true });
   try {
@@ -268,7 +288,7 @@ export async function bootIntoPane(opts: {
 
   await waitForShellReady(opts.herdr, opts.paneId, remaining(), opts.signal);
   await opts.herdr.runInPane(opts.paneId, opts.bootCmd, opts.signal);
-  return waitUntilAgentReady(opts.herdr, opts.paneId, remaining(), opts.signal);
+  return waitUntilAgentReady(opts.herdr, opts.paneId, remaining(), opts.signal, opts.onStatus);
 }
 
 /** Create a labeled tab (--no-focus) in the current workspace and boot pi. */
@@ -281,6 +301,7 @@ export async function createAndBootJob(opts: {
   timeoutMs?: number;
   signal?: AbortSignal;
   onPaneCreated?: (paneId: string, workspaceId: string) => void;
+  onStatus?: PaneStatusHandler;
 }): Promise<{ paneId: string; workspaceId: string }> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
   const currentPane = await opts.herdr.getCurrentPaneInfo(opts.signal);
@@ -301,6 +322,7 @@ export async function createAndBootJob(opts: {
     label: opts.label,
     timeoutMs,
     signal: opts.signal,
+    onStatus: opts.onStatus,
   });
 
   return { paneId, workspaceId };
@@ -317,6 +339,9 @@ export async function stopAgentInPane(opts: {
 
   let pane = await opts.herdr.getPaneInfo(opts.paneId, opts.signal);
   if (!paneHasAgent(pane)) return;
+  if (normalizeStatus(pane?.agent_status) === "blocked") {
+    throw new Error(`Pane ${opts.paneId} is blocked; close it without answering its prompt.`);
+  }
 
   try {
     await opts.herdr.runInPane(opts.paneId, "/quit", opts.signal);
@@ -329,6 +354,9 @@ export async function stopAgentInPane(opts: {
     if (opts.signal?.aborted) throw new Error("Aborted");
     pane = await opts.herdr.getPaneInfo(opts.paneId, opts.signal);
     if (!paneHasAgent(pane)) return;
+    if (normalizeStatus(pane?.agent_status) === "blocked") {
+      throw new Error(`Pane ${opts.paneId} is blocked; close it without answering its prompt.`);
+    }
     if (!resent && Date.now() >= deadline - timeoutMs / 2) {
       resent = true;
       try {
@@ -442,11 +470,13 @@ export async function waitForJobIdle(opts: {
   /** Pi must close reception before we release this worker's lanes/capacity. */
   mailboxFinished?: () => boolean;
   signal?: AbortSignal;
+  onStatus?: PaneStatusHandler;
 }): Promise<{ status: string; sawBusy: boolean }> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS;
   let deadline = Date.now() + timeoutMs;
   let sawBusy = false;
   const started = Date.now();
+  const observe = statusObserver(opts.onStatus);
   let useNativeWait = typeof opts.herdr.waitAgentStatus === "function";
 
   function hasPostSubmitEvidence(): boolean {
@@ -465,7 +495,26 @@ export async function waitForJobIdle(opts: {
     return false;
   }
 
-  // Stall clock, not job wall-clock: timeoutMs only applies while NOT busy.
+  function assertSessionSucceeded(): void {
+    if (!opts.sessionFile) return;
+    let entries;
+    try {
+      entries = getNewEntries(opts.sessionFile, opts.watermark ?? 0);
+    } catch {
+      return; // Session may be absent or its final JSONL line still in flight.
+    }
+    const last = entries.findLast(entry =>
+      entry.type === "message" && (entry as MessageEntry).message?.role === "assistant",
+    ) as MessageEntry | undefined;
+    const reason = last?.message.stopReason;
+    if (reason === "aborted" || reason === "error") {
+      const error = new Error(`Worker in pane ${opts.paneId} ended with stopReason=${reason}.`);
+      if (reason === "aborted") error.name = "AbortError";
+      throw error;
+    }
+  }
+
+  // Stall clock, not job wall-clock: only working slides it, not user prompts.
   // A 10min local review must not free the GPU seat under itself.
   while (true) {
     if (opts.signal?.aborted) throw new Error("Aborted");
@@ -474,10 +523,9 @@ export async function waitForJobIdle(opts: {
     if (!pane) throw new Error(`Pane ${opts.paneId} disappeared while waiting`);
 
     const status = normalizeStatus(pane.agent_status);
-    if (status === "working" || status === "blocked") {
-      sawBusy = true;
-      deadline = Date.now() + timeoutMs;
-    }
+    observe(status);
+    if (status === "working" || status === "blocked") sawBusy = true;
+    if (status === "working") deadline = Date.now() + timeoutMs;
 
     if (status === "idle" || status === "done") {
       const elapsed = Date.now() - started;
@@ -494,6 +542,7 @@ export async function waitForJobIdle(opts: {
           await sleep(Math.min(POLL_MS, remaining), opts.signal);
           continue;
         }
+        assertSessionSucceeded();
         if (
           opts.outputPath &&
           !isOutputReady(opts.outputPath, opts.outputBaselineBytes)
@@ -518,7 +567,7 @@ export async function waitForJobIdle(opts: {
         await opts.herdr.waitAgentStatus(
           opts.paneId,
           "idle",
-          remaining,
+          Math.min(POLL_MS, remaining),
           opts.signal,
         );
         continue;
@@ -532,17 +581,19 @@ export async function waitForJobIdle(opts: {
       }
     }
 
-    await sleep(POLL_MS, opts.signal);
+    await sleep(Math.min(POLL_MS, Math.max(1, deadline - Date.now())), opts.signal);
   }
 
   const pane = await opts.herdr.getPaneInfo(opts.paneId, opts.signal);
   const last = pane ? normalizeStatus(pane.agent_status) : "unknown";
+  observe(last);
 
   if (
     (last === "idle" || last === "done") &&
     (sawBusy || (opts.allowIdleWithoutBusy && hasPostSubmitEvidence())) &&
     (!opts.mailboxFinished || opts.mailboxFinished())
   ) {
+    assertSessionSucceeded();
     if (
       opts.outputPath &&
       !isOutputReady(opts.outputPath, opts.outputBaselineBytes)

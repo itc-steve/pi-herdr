@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   parseHerdConfig,
   resolveRole,
@@ -60,6 +61,21 @@ describe("parseHerdConfig", () => {
     assert.equal(cfg.defaults.requireOutput, true);
     assert.equal(cfg.defaults.resultDelivery, "pointer");
     assert.equal(cfg.defaults.triggerTurnOnResult, true);
+  });
+
+  it("defaults and example expose Astra escalation without adding OpenAI capacity", () => {
+    const example = JSON.parse(readFileSync(new URL("../herd.json.example", import.meta.url), "utf8"));
+    for (const raw of [defaultConfigObject(), example]) {
+      const { workers } = parseHerdConfig(raw);
+      assert.deepEqual(Object.keys(workers).sort(), ["astra", "codex", "grok", "local"]);
+      for (const worker of Object.values(workers)) assert.equal(worker.thinking, "medium");
+      assert.equal(workers.astra!.group, workers.codex!.group);
+      assert.equal(workers.astra!.maxConcurrent, workers.codex!.maxConcurrent);
+      assert.match(workers.local!.description, /Always use medium thinking; never override it/);
+      assert.match(workers.astra!.description, /xhigh only for exceptional unresolved problems/);
+      assert.match(workers.codex!.description, /high for difficult implementation/);
+      assert.match(workers.grok!.description, /high for difficult analysis/);
+    }
   });
 
   it("folds old easy/medium/hard into think rank (hard first)", () => {

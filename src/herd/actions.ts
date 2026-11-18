@@ -1,3 +1,4 @@
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { HerdConfig } from "../types.ts";
 import { ensureHerdConfigFile, sessionDirAbs } from "../config.ts";
 import { formatWorkers } from "../workers.ts";
@@ -60,6 +61,7 @@ export type HerdRuntime = {
   monitor: HerdMonitor;
   queue: JobQueue;
   modelProbe?: ModelProbeFn;
+  modelRegistry?: Pick<ExtensionContext["modelRegistry"], "find">;
   workerMailbox?: WorkerMailbox;
   /** Redaction for cloud parents; set by index.ts. Identity when absent. */
   sanitizeForCloud?: (text: string) => string;
@@ -96,7 +98,7 @@ export async function executeHerd(
 
   if (action === "models") {
     ensureHerdConfigFile();
-    const text = formatWorkers(config);
+    const text = formatWorkers(config, runtime.modelRegistry);
     return { text, details: { action } };
   }
 
@@ -249,7 +251,13 @@ export async function executeHerd(
     if (!job) throw new Error(`Unknown job '${jobId}'`);
     const queued = runtime.queue.get(jobId);
     if (!queued) throw new Error(`No queued job '${jobId}'`);
-    await waitForQueuedJob(queued.finished, params.timeoutMs, signal);
+    const finishedInTime = await waitForQueuedJob(queued.finished, params.timeoutMs, signal);
+    if (!finishedInTime) {
+      return {
+        text: `Job ${jobId} still ${queued.status} after ${params.timeoutMs ?? 600_000}ms; it keeps running in the background. Call wait again with a larger timeoutMs (or omit it for the 10-minute default), or check herd status.`,
+        details: { action, jobId, status: queued.status, timedOut: true },
+      };
+    }
     return {
       text: `Job ${jobId}: ${queued.status}${queued.error ? ` · ${runtime.sanitizeForCloud?.(queued.error) ?? queued.error}` : ""}`,
       details: { action, jobId },

@@ -4,19 +4,27 @@
       "model": "local-provider/local-model",
       "thinking": "medium",
       "maxConcurrent": 2,
-      "description": "Small tasks with clear checks; private customer data, PII, and secrets."
+      "description": "Small bounded tasks with explicit checks; private customer data, PII, and secrets stay local. Always use medium thinking; never override it. Avoid broad implementation without a precise plan."
     },
     "grok": {
       "model": "grok-provider/grok-model",
       "thinking": "medium",
       "maxConcurrent": 1,
-      "description": "Implementation, investigation, or independent review."
+      "description": "Research, document analysis, and independent critique from another provider. Use medium normally and high for difficult analysis or independent critique. Verify current claims against sources."
     },
     "codex": {
-      "model": "openai-codex/codex-model",
+      "model": "openai-codex/your-sol-model",
       "thinking": "medium",
       "maxConcurrent": 1,
-      "description": "Implementation, investigation, or independent review."
+      "group": "codex",
+      "description": "Implementation, debugging, refactoring, and tests. Use medium for normal coding, low for mechanical edits, high for difficult implementation. Prefer Astra for exceptional unresolved reasoning problems."
+    },
+    "astra": {
+      "model": "openai-codex/your-astra-model",
+      "thinking": "medium",
+      "maxConcurrent": 1,
+      "group": "codex",
+      "description": "Difficult root-cause analysis, ambiguous architecture, and high-consequence decisions or reviews. Can implement directly when that avoids a handoff. Use medium normally, high for difficult work, and xhigh only for exceptional unresolved problems where extra usage and latency are justified. Do not use xhigh for routine coding, broad scans, or missing requirements."
     }
   },
   "private": { "enabled": false }

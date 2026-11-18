@@ -17,7 +17,7 @@ What it does for you:
 
 ## 1. Install
 
-You need **Pi, Herdr, Node.js 22.19+, and working model connections in Pi**. This extension uses those connections; it does not provide subscriptions or configure model servers.
+You need **Pi 1.5.0+, Herdr, Node.js 22.19+, and working model connections in Pi**. This extension uses those connections; it does not provide subscriptions or configure model servers.
 
 Run Pi inside [Herdr](https://herdr.dev), then install:
 
@@ -31,7 +31,7 @@ For a local checkout, use `pi install /path/to/pi-herdr` instead. Run `/reload` 
 
 Save this as `~/.pi/agent/herd.json`, or start from [herd.json.example](herd.json.example).
 
-**Replace the three model placeholders with exact `provider/model` IDs available in your Pi setup.** The worker named `local` must point to your trusted local model.
+**Replace the four model placeholders with exact `provider/model` IDs available in your Pi setup.** The worker named `local` must point to your trusted local model.
 
 ```json
 {
@@ -40,28 +40,38 @@ Save this as `~/.pi/agent/herd.json`, or start from [herd.json.example](herd.jso
       "model": "local-provider/local-model",
       "thinking": "medium",
       "maxConcurrent": 2,
-      "description": "Small tasks with clear checks; private customer data, PII, and secrets."
+      "description": "Bounded tasks and private data. Always use medium thinking; never override it."
     },
     "grok": {
       "model": "grok-provider/grok-model",
       "thinking": "medium",
       "maxConcurrent": 1,
-      "description": "Implementation, investigation, or independent review."
+      "description": "Research and independent critique. Use medium normally, high for difficult analysis."
     },
     "codex": {
-      "model": "openai-codex/codex-model",
+      "model": "openai-codex/your-sol-model",
       "thinking": "medium",
       "maxConcurrent": 1,
-      "description": "Implementation, investigation, or independent review."
+      "group": "codex",
+      "description": "Implementation and tests. Use medium normally, low for mechanical edits, high for difficult work."
+    },
+    "astra": {
+      "model": "openai-codex/your-astra-model",
+      "thinking": "medium",
+      "maxConcurrent": 1,
+      "group": "codex",
+      "description": "Difficult diagnosis, architecture, and high-consequence decisions. Use medium/high; xhigh only for exceptional unresolved problems."
     }
   },
   "private": { "enabled": false }
 }
 ```
 
-Use a `thinking` level supported by each model. `maxConcurrent` limits running jobs, not how many you can queue. Worker descriptions help the main agent choose. The `local` worker is required for private tasks; every other worker is optional — define only the workers you actually have connections for, with any names you like.
+Use a `thinking` level supported by each model. These defaults keep local thinking at medium and reserve Astra `xhigh` for exceptional tasks via a per-spawn override; descriptions guide the agent, not enforce allowed levels. Sol and Astra share `group: "codex"` and the same capacity, so adding Astra does not double OpenAI concurrency. Omit Astra if unavailable in your model catalog. `maxConcurrent` limits running jobs, not how many you can queue. Worker descriptions help the main agent choose. The `local` worker is required for private tasks; every other worker is optional — define only the workers you actually have connections for, with any names you like.
 
-Run `/herd models` to check the configuration. To use private tasks and auto-redaction, set `private.enabled` to `true` after configuring your local model.
+Configured worker names, models, thinking levels, concurrency limits, and descriptions are included in the tool's model-facing guidance before the first call and refreshed on each new agent run, including result-triggered runs. Describe each worker's best-fit tasks and limits so the parent has a useful basis for choosing; worker names do not imply capabilities. Keep descriptions free of private data—they enter the parent's model context.
+
+Run `/herd models` to check current configuration and model-registry diagnostics. Spawns reject unknown model IDs and invalid thinking levels before allocating a job; valid but unsupported thinking levels are clamped using Pi's model capabilities and reported. Registry checks do not prove server availability or valid credentials. Config edits refresh guidance on the next run without `/reload`; already queued jobs keep their selected settings. To use private tasks and auto-redaction, set `private.enabled` to `true` after configuring your local model.
 
 ## 3. Ask normally
 
@@ -74,6 +84,12 @@ Or:
 > Process these customer records locally. Return counts by error category—no names, identifiers, or raw records.
 
 The agent creates a run, queues tasks, reads their reports, and checks the results. Workers appear in background Herdr tabs. The main agent keeps control; workers cannot spawn more workers.
+
+### Ovis chat
+
+Workers advertise their per-run session store with `PI_CODING_AGENT_SESSION_DIR`, matching the explicit `--session` file. This lets Ovis authorize herd sessions without moving them or switching Pi into RPC mode. Ovis still needs Herdr's Pi session-reporting integration and access to the foreground Pi process environment; the custom-store contract is verified on Linux. Existing Ovis authentication and path checks remain intact. Private workers' transcripts are also available to the already-authorized Ovis UI—they are not hidden from the local user.
+
+After updating this extension, finish or abort active jobs, then `/reload` before spawning new workers. Existing worker processes retain their old launch environment.
 
 ## How coordination works
 
@@ -154,6 +170,8 @@ The main agent is prompted to delegate **customer information, personally identi
 
 Auto-redaction masks recognized secrets in cloud-facing tool results and model requests. A `[PRIVATE:…]` marker tells the agent to delegate locally rather than try another retrieval method.
 
+Private workers start with `--no-mcp`, disabling Pi's built-in MCP connections. This does not disable network access through bash, other extensions, or a replacement MCP implementation.
+
 **This is not guaranteed containment.** Regex detection can miss ordinary PII, unfamiliar formats, and images. The configured local endpoint must actually be trusted. If local/private mode is unavailable, the prompt tells the agent to stop and ask rather than send sensitive inputs to cloud.
 
 ## Useful commands
@@ -184,7 +202,7 @@ Most settings can stay at their defaults:
 | `sessionDir` | `~/.pi/agent/herd`; stores run notes, reports, sessions, and journals |
 | `workers.<name>.group` | Defaults to the worker name; use the same group for workers sharing a subscription |
 | `workers.local.preflight` | `true`; check local availability before booting a worker |
-| `defaults.timeoutMs` | `600000`; stall timeout, not a hard runtime limit for a busy worker |
+| `defaults.timeoutMs` | `600000`; stall timeout; only active work extends it, not a blocked user prompt |
 | `defaults.resultDelivery` | `"pointer"`; use `"full"` to include replies in completion messages |
 | `defaults.triggerTurnOnResult` | `true`; let completion messages wake the main agent |
 
@@ -192,7 +210,8 @@ For an individual spawn, `model=` selects an exact model instead of a worker nam
 
 Keep these limits in mind:
 
-- **Ownership is scheduling plus instructions, not a filesystem sandbox.** Parent/manual edits must respect workers' files too. The main agent still needs integration checks.
+- **Ownership adds an edit/write guard, not a filesystem sandbox.** Built-in `edit` and `write` are limited to `owns=` and the exact assigned report, with `forbid=` taking precedence and canonical path checks. Report-only workers can still write their report. Bash, arbitrary extension tools, hard links, and filesystem races are not isolated. Parent/manual edits must respect workers' files too; integration checks remain necessary.
+- **Blocked prompts need attention.** Herd reports the job and pane in a warning/status indicator. It never answers trust or confirmation prompts automatically. If the stall/boot deadline expires, it attempts to stop or close the worker; reservations remain held if cleanup fails. A cancelled parent does not auto-restart when later results arrive; pointers still display.
 - **Queues belong to one parent session.** Finish or abort work before `/reload`. There is no automatic queue resume or coordination between separate parent sessions; saved reports remain on disk.
 - **Concurrency is not quota tracking.** Your parent session and other applications also consume subscription usage.
 - **Failed dependencies block later tasks.** Resolve the issue, cancel the blocked dependents, and submit replacement work.
@@ -215,7 +234,7 @@ Keep these limits in mind:
 ## Development
 
 ```bash
-npm ci
+npm ci --ignore-scripts
 npm test
 npm run typecheck
 ```

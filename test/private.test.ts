@@ -149,6 +149,62 @@ const SECRET_FIXTURES: Fixture[] = [
     count: 1,
   },
   {
+    name: "Docker PAT",
+    input: `dckr_pat_${"A".repeat(20)}`,
+    leaked: [`dckr_pat_${"A".repeat(20)}`],
+    marker: "[PRIVATE:Docker PAT]",
+    count: 1,
+  },
+  {
+    name: "HuggingFace token",
+    input: `hf_${"B".repeat(20)}`,
+    leaked: [`hf_${"B".repeat(20)}`],
+    marker: "[PRIVATE:HuggingFace Token]",
+    count: 1,
+  },
+  {
+    name: "PyPI token",
+    input: `pypi-Po-${"C".repeat(20)}`,
+    leaked: [`pypi-Po-${"C".repeat(20)}`],
+    marker: "[PRIVATE:PyPI Token]",
+    count: 1,
+  },
+  {
+    name: "Stripe restricted key",
+    input: `rk_live_${"D".repeat(20)}`,
+    leaked: [`rk_live_${"D".repeat(20)}`],
+    marker: "[PRIVATE:Stripe Restricted Key]",
+    count: 1,
+  },
+  {
+    name: "AWS identifier",
+    input: "AROAEXAMPLEKEYHERE01",
+    leaked: ["AROAEXAMPLEKEYHERE01"],
+    marker: "[PRIVATE:AWS Identifier]",
+    count: 1,
+  },
+  {
+    name: "long JWT before Kagi shape",
+    input: `eyJ${"A".repeat(40)}.eyJ${"B".repeat(40)}.${"C".repeat(20)}`,
+    leaked: [`eyJ${"A".repeat(40)}`],
+    marker: "[PRIVATE:JWT]",
+    count: 1,
+  },
+  {
+    name: "CLI password flag",
+    input: "mysql --password CanaryCliPass01 -h host",
+    leaked: ["CanaryCliPass01"],
+    marker: "[PRIVATE:CLI Secret Flag]",
+    count: 1,
+  },
+  {
+    name: "CLI basic auth",
+    input: "curl -u admin:CanaryBasicPass01 https://example.com",
+    leaked: ["CanaryBasicPass01"],
+    marker: "[PRIVATE:CLI Basic Auth]",
+    count: 1,
+  },
+  {
     name: "generic secret phrase with explicit value",
     input: "password is CanaryPassword-Redaction-001!",
     leaked: ["CanaryPassword-Redaction-001!"],
@@ -312,7 +368,21 @@ AUTH_TOKEN = "${values.uppercase}"`;
     assert.equal(redacted, input);
   });
 
-  it("does not redact ordinary package metadata and documentation links", () => {
+    it("does not treat a dotted eyJ token as JWT unless the payload also starts eyJ", () => {
+    const input = [
+      "eyJ",
+      "hbGciOiJIUzI1NiJ9",
+      ".",
+      "notajwtpayloadxx",
+      ".",
+      "signaturevalue123456",
+    ].join("");
+    const { redacted, count } = redactForCloud(input);
+    assert.equal(count, 0);
+    assert.equal(redacted, input);
+  });
+
+it("does not redact ordinary package metadata and documentation links", () => {
     const input = JSON.stringify(
       {
         name: "my-pi",
@@ -623,5 +693,84 @@ describe("createPrivateKeyContinuationTracker", () => {
 
     tracker.noteChunk(path, block);
     assert.equal(tracker.forcePrivateKey(path), false);
+  });
+});
+
+describe("numbered private-key output", () => {
+  for (const [name, prefix] of [
+    ["plain delimiter lines", (_line: number) => ""],
+    ["search matches", (line: number) => `config.txt:${line}:`],
+    ["search context", (line: number) => `my-config.txt-${line}-`],
+    ["mixed search output", (line: number) => line === 1 ? `config.txt:${line}:` : `config.txt-${line}-`],
+    ["numbered matches", (line: number) => `${line}:`],
+    ["numbered context", (line: number) => `${line}-`],
+    ["numbered lines", (line: number) => `     ${line}\t`],
+  ] as const) {
+    it(`redacts ${name} across entry points and read chunks`, () => {
+      const begin = `${prefix(1)}-----BEGIN RSA PRIVATE KEY-----`;
+      const body = `${prefix(2)}synthetic-noncredential-body`;
+      const end = `${prefix(3)}-----END RSA PRIVATE KEY-----`;
+      const input = [begin, body, end, "ordinary output"].join("\r\n");
+      const result = redactForCloud(input);
+      assert.equal(result.count, 1);
+      assert.equal(result.redacted, "[PRIVATE:Private Key]\nordinary output");
+      assert.deepEqual(redactForCloud(result.redacted), { redacted: result.redacted, count: 0 });
+
+      const messages = [{ role: "toolResult", content: [{ type: "text", text: input }] }];
+      assert.equal(redactContextMessages(messages), true);
+      assert.equal(messages[0]!.content[0]!.text, result.redacted);
+      const payload = { messages: [{ content: input }] };
+      assert.equal(redactProviderPayload(payload), true);
+      assert.equal(payload.messages[0]!.content, result.redacted);
+
+      const tracker = createPrivateKeyContinuationTracker();
+      const path = "/tmp/synthetic-output.txt";
+      const first = `${begin}\r\n${body}`;
+      assert.equal(redactForCloud(first).redacted, "[PRIVATE:Private Key]");
+      tracker.noteChunk(path, first);
+      assert.equal(tracker.forcePrivateKey(path), true);
+      assert.equal(redactForCloud(`${body}\r\n${end}`, {
+        forcePrivateKey: tracker.forcePrivateKey(path),
+      }).redacted, "[PRIVATE:Private Key continuation]");
+      tracker.noteChunk(path, `${body}\r\n${end}`);
+      assert.equal(tracker.forcePrivateKey(path), false);
+      tracker.noteChunk(path, input);
+      assert.equal(tracker.forcePrivateKey(path), false);
+    });
+  }
+});
+
+describe("coding-session false positives", () => {
+  it("preserves credential expressions from the reported session", () => {
+    const input = `if (value.method === 'password') return { method: 'password', password: secret(value.password) };
+body.auth = { method: 'password', password: fields.password };
+config.setSessionDevice(device.name, { token: device.token, verifySsl: device.verifySsl !== false });
+assert.deepEqual(body, { password: fields.password });`;
+    assert.deepEqual(redactForCloud(input), { redacted: input, count: 0 });
+    const messages = [{ role: "toolResult", content: [{ type: "text", text: input }] }];
+    assert.equal(redactContextMessages(messages), false);
+    const payload = { messages, arguments: { content: input } };
+    assert.equal(redactProviderPayload(payload), false);
+  });
+
+  it("keeps quoted literals and unquoted config credentials protected", () => {
+    for (const input of [
+      'password: "literal-credential-value"',
+      'password: literalcredentialvalue',
+      'TOKEN=device.token.value',
+      'PASSWORD=secret(value.password)',
+    ]) {
+      assert.ok(redactForCloud(input).count > 0, input);
+    }
+  });
+
+  it("does not consume source after an inline private-key header", () => {
+    for (const prefix of ["", "source.ts:1:", "source.ts-1-", "1:", "     1\t"]) {
+      const input = `${prefix}const header = '-----BEGIN PRIVATE KEY-----';\nconst next = doWork();`;
+      assert.deepEqual(redactForCloud(input), { redacted: input, count: 0 });
+      const tracker = createPrivateKeyContinuationTracker();
+      tracker.noteChunk("/tmp/source.ts", input);
+      assert.equal(tracker.forcePrivateKey("/tmp/source.ts"), false);
+    }
   });
 });

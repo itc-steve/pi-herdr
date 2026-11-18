@@ -2,6 +2,33 @@
 
 All notable changes to `@itc-steve/pi-herdr` are documented here.
 
+## [Unreleased]
+
+## [2.0.2] — 2026-11-18
+
+**Compatibility:** Requires Pi 1.5.0 or newer. Finish or abort active herd jobs, then `/reload` before spawning new workers.
+
+### Fixed
+
+- Make herd worker sessions discoverable by Ovis by declaring the exact per-run Pi session store, including private workers; preserve Ovis authorization checks and background-tab focus.
+- Bound waits for workers blocked on user prompts, surface their pane IDs, and retain capacity/write lanes until failed or cancelled workers are confirmed stopped. Reject explicit aborted/error session outcomes as successful completion.
+- Use structured Pi prompt updates instead of replacing the full system prompt or duplicating privacy guidance; refresh configured worker guidance on each run.
+- Explain private markers in cloud system/tool guidance when privacy is enabled, with bounded local herd delegation, sanitized reporting, and explicit instructions to preserve source values.
+- Avoid private-marker false positives on credential property references and function calls in source code. Recognize private-key delimiter lines in plain and numbered search output without treating inline source strings as key blocks or arming continuation tracking for them.
+
+### Added
+
+- Example and generated worker defaults include Astra escalation alongside Sol, with shared OpenAI concurrency. Worker descriptions specify effort selection, local medium-only guidance, and exceptional-use Astra `xhigh`.
+- Herd tool guidance includes configured workers and their runtime defaults/descriptions before the first tool call and refreshes on each new run; `herd models` also reports model-capability diagnostics.
+- Guard worker built-in edit/write calls with owned/forbidden paths and an exact report exception. Private workers disable built-in MCP connections; these controls are not a shell or network sandbox.
+- Compact, expandable herd tool/results/peer/slash rendering with configured key hints, elapsed duration, and wait progress.
+
+### Changed
+
+- Require Pi 1.5.0+ and validate against its current development packages. Keep JSON Schema enum declarations compatible with TypeBox inference.
+- Validate model IDs and thinking levels before creating jobs; clamp supported levels through Pi's model-capability API. Esc-cancelled parents no longer auto-restart for later results.
+- Worker-selection guidance uses configured descriptions rather than assuming Grok/Codex worker names or capabilities. Routing and privacy constraints are unchanged.
+
 ## [2.0.1] — 2026-10-07
 
 ### README and packaging

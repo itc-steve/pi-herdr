@@ -3,7 +3,7 @@
  * Completion: wait idle + output → collect → onComplete (parent follow-up).
  */
 
-import type { CatalogEntry } from "../types.ts";
+import type { AgentStatus, CatalogEntry } from "../types.ts";
 import { pickDoEntry, pickThinkEntry, THINK_PER_MODEL } from "../resolve-model.ts";
 import type { HerdrClient } from "../herdr/client.ts";
 import {
@@ -15,6 +15,7 @@ import {
   collectReply,
   DEFAULT_DISPATCH_TIMEOUT_MS,
   waitForJobIdle,
+  stopAgentInPane,
   type JobHandle,
 } from "./boot.ts";
 
@@ -69,11 +70,30 @@ export function createHerdMonitor(opts: {
   getMaxConcurrent: () => number;
   herdr: () => HerdrClient | null;
   onChange?: () => void;
+  onBlocked?: (jobId: string, paneId: string) => void;
   onComplete: MonitorCompleteHandler;
   sanitizeReply?: (text: string) => string;
 }) {
   const jobs = new Map<string, MonitorJob>();
   const controllers = new Map<string, AbortController>();
+  // Live prompt state is separate from queue dependency/cleanup blocking.
+  const blockedPanes = new Map<string, string>();
+
+  function setPaneStatus(jobId: string, paneId: string, status: AgentStatus): void {
+    const previous = blockedPanes.get(jobId);
+    if (status === "blocked") {
+      blockedPanes.set(jobId, paneId);
+      if (previous === paneId) return;
+      notifyChange();
+      opts.onBlocked?.(jobId, paneId);
+    } else if (blockedPanes.delete(jobId)) {
+      notifyChange();
+    }
+  }
+
+  function blockedJobs(): Array<{ jobId: string; paneId: string }> {
+    return [...blockedPanes].map(([jobId, paneId]) => ({ jobId, paneId }));
+  }
   const pruneTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** ticketId → model currently holding a per-model seat */
   const slotModel = new Map<string, string>();
@@ -378,10 +398,7 @@ export function createHerdMonitor(opts: {
   }): MonitorJob {
     const herdr = opts.herdr();
     if (!herdr) {
-      releaseSlot(optsWatch.ticketId);
-      jobs.delete(optsWatch.ticketId);
-      controllers.delete(optsWatch.ticketId);
-      throw new Error("herdr client unavailable for monitor");
+      throw new Error("herdr client unavailable for monitor; cleanup must succeed before releasing its ticket");
     }
 
     const existing = jobs.get(optsWatch.ticketId);
@@ -414,6 +431,7 @@ export function createHerdMonitor(opts: {
           outputBaselineBytes: optsWatch.handle.outputBaselineBytes,
           mailboxFinished: optsWatch.mailboxFinished,
           signal: ac.signal,
+          onStatus: status => setPaneStatus(job.handle.jobId, job.handle.paneId, status),
         });
 
         if (ac.signal.aborted) throw new Error("Aborted");
@@ -425,30 +443,41 @@ export function createHerdMonitor(opts: {
           sanitize: opts.sanitizeReply,
         });
 
+        setPaneStatus(job.handle.jobId, job.handle.paneId, "done");
         job.status = "done";
         job.reply = collected.reply;
         notifyChange();
-        await opts.onComplete({
-          job,
-          status: "done",
-          reply: collected.reply,
-        });
       } catch (err) {
         const aborted = ac.signal.aborted || isAbortError(err);
         const message = err instanceof Error ? err.message : String(err);
+        setPaneStatus(job.handle.jobId, job.handle.paneId, "unknown");
+        // A timeout/cancel is not evidence that the pane stopped using its lanes.
+        try {
+          await stopAgentInPane({ herdr, paneId: job.handle.paneId, signal: AbortSignal.timeout(35_000) });
+        } catch {
+          try {
+            await herdr.closePane(job.handle.paneId, AbortSignal.timeout(10_000));
+          } catch {
+            job.error = `${message} Could not stop pane ${job.handle.paneId}; capacity and lanes remain held. Stop it, then herd close jobId=${job.handle.jobId}.`;
+            notifyChange();
+            return;
+          }
+        }
         job.status = aborted ? "aborted" : "failed";
         job.error = message;
         notifyChange();
-        await opts.onComplete({
-          job,
-          status: aborted ? "aborted" : "failed",
-          error: message,
-        });
       } finally {
-        releaseSlot(job.id);
-        controllers.delete(job.id);
-        schedulePrune(job.id);
-        notifyChange();
+        if (job.status === "done" || job.status === "failed" || job.status === "aborted") {
+          try {
+            await opts.onComplete({ job, status: job.status, reply: job.reply, error: job.error });
+          } catch (err) {
+            job.error = `Completion notification failed: ${err instanceof Error ? err.message : String(err)}`;
+          }
+          releaseSlot(job.id);
+          controllers.delete(job.id);
+          schedulePrune(job.id);
+          notifyChange();
+        }
       }
     })();
 
@@ -456,6 +485,8 @@ export function createHerdMonitor(opts: {
   }
 
   function releaseTicket(ticketId: string): void {
+    const job = jobs.get(ticketId);
+    if (job) setPaneStatus(job.handle.jobId, job.handle.paneId, "unknown");
     releaseSlot(ticketId);
     jobs.delete(ticketId);
     controllers.delete(ticketId);
@@ -476,6 +507,7 @@ export function createHerdMonitor(opts: {
         (optsAbort.jobId && optsAbort.jobId === job.handle.jobId)
       ) {
         if (job.status === "running" || job.status === "queued") {
+          setPaneStatus(job.handle.jobId, job.handle.paneId, "unknown");
           controllers.get(id)?.abort();
           const waiterIndex = slotWaiters.findIndex((w) => w.ticketId === id);
           if (waiterIndex !== -1) {
@@ -522,6 +554,8 @@ export function createHerdMonitor(opts: {
 
   return {
     reserveSlot,
+    setPaneStatus,
+    blockedJobs,
     attachAndWatch,
     releaseTicket,
     abort,

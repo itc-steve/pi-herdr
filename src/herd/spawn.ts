@@ -3,6 +3,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import type { HerdConfig, ManagedJob } from "../types.ts";
 import type { Mailbox } from "./mailbox.ts";
 import {
@@ -259,15 +260,24 @@ export async function spawnJob(opts: {
     });
 
     let baseBootCmd = bootCommand(resolved.model, resolved.thinking, sessionFile);
-    // Explicit loading also supports parents started with pi -e rather than a global install.
+    // All workers need the write policy, even without a mailbox or global install.
+    baseBootCmd += ` --extension ${shellQuote(fileURLToPath(new URL("../../index.ts", import.meta.url)))}`;
+    if (isPrivate) baseBootCmd += " --no-mcp";
     const mailbox = isPrivate ? undefined : opts.mailbox;
-    if (mailbox) baseBootCmd += ` --extension ${shellQuote(fileURLToPath(new URL("../../index.ts", import.meta.url)))}`;
-    const mailEnv = mailbox ? `PI_HERD_MAILBOX=${shellQuote(mailbox.dir)} PI_HERD_JOB=${shellQuote(jobId)} ` : "";
-    // Nested-spawn marker inherited by the child process. Private jobs get no mailbox identity.
-    const bootCmd = isPrivate
-      ? `env PI_HERD_PRIVATE=1 ${baseBootCmd}`
-      : `env PI_HERD_WORKER=1 ${mailEnv}${baseBootCmd}`;
     const cwd = params.cwd?.trim() || process.cwd();
+    const workerEnv = [
+      "PI_HERD_WORKER=1",
+      "PI_PROGRAM_STATUS=1",
+      `PI_CODING_AGENT_SESSION_DIR=${shellQuote(dirname(sessionFile))}`,
+      `PI_HERD_ROOT=${shellQuote(resolve(cwd))}`,
+      `PI_HERD_OWNS=${shellQuote(JSON.stringify(owns))}`,
+      `PI_HERD_FORBID=${shellQuote(JSON.stringify(forbid))}`,
+      ...(outputPath ? [`PI_HERD_OUTPUT=${shellQuote(outputPath)}`] : []),
+      ...(isPrivate ? ["PI_HERD_PRIVATE=1"] : []),
+      ...(mailbox ? [`PI_HERD_MAILBOX=${shellQuote(mailbox.dir)}`, `PI_HERD_JOB=${shellQuote(jobId)}`] : []),
+    ];
+    // Clear optional inherited identities/policy before assigning this job's values.
+    const bootCmd = `env -u PI_HERD_PRIVATE -u PI_HERD_MAILBOX -u PI_HERD_JOB -u PI_HERD_OUTPUT ${workerEnv.join(" ")} ${baseBootCmd}`;
     const bootTimeout = Math.min(
       params.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS,
       DEFAULT_BOOT_TIMEOUT_MS,
@@ -281,6 +291,7 @@ export async function spawnJob(opts: {
       sessionFile,
       timeoutMs: bootTimeout,
       signal: opts.parentSignal,
+      onStatus: status => monitor.setPaneStatus(jobId, startedPane, status),
       onPaneCreated: (id, workspace) => {
         startedPane = id;
         const queued = state.jobs[jobId];
@@ -355,6 +366,7 @@ export async function spawnJob(opts: {
           outputPath,
           outputBaselineBytes,
           mailboxFinished: mailbox ? () => mailbox.isFinished(jobId) : undefined,
+          onStatus: status => monitor.setPaneStatus(jobId, paneId, status),
           signal: opts.parentSignal,
         });
         const collected = await collectReply({
