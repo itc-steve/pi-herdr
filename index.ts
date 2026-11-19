@@ -26,7 +26,7 @@ import {
   parseHerdSlashArgs,
 } from "./src/herd/slash.ts";
 import { registerHerdrTool } from "./src/herdr/tool.ts";
-import { createHerdrClient, isHerdrEnv } from "./src/herdr/client.ts";
+import { createTerminalClient } from "./src/herdr/runtime.ts";
 import { createHerdMonitor, type MonitorCompleteEvent } from "./src/herd/monitor.ts";
 import { createJobQueue, type JobQueue } from "./src/herd/queue.ts";
 import { bindWorkerMailbox } from "./src/herd/mailbox-worker.ts";
@@ -97,7 +97,7 @@ const HerdParams = Type.Object({
     }),
   ),
   thinking: Type.Optional(Type.String()),
-  label: Type.Optional(Type.String({ description: "Two-word Herdr tab label (task or agent role)" })),
+  label: Type.Optional(Type.String({ description: "Two-word worker label (TUI tab or core terminal; task or agent role)" })),
   run: Type.Optional(Type.String({ description: "Handoff run id" })),
   runAction: Type.Optional(RunActionEnum),
   name: Type.Optional(Type.String({ description: "For run create/use/show" })),
@@ -233,11 +233,12 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Always dispatch herdr via the refreshable holder (stale pi after reload).
-  const herdrClient = isHerdrEnv()
-    ? createHerdrClient((command, args, options) =>
-        holder.pi.exec(command, args, options),
-      )
-    : null;
+  const herdrClient = createTerminalClient((command, args, options) =>
+    holder.pi.exec(command, args, options),
+  );
+  const promptGuidelines = herdrClient?.kind === "core"
+    ? [...PROMPT_GUIDELINES.slice(0, -1), "Use herdr to inspect/control existing core terminals; no workspace/tab/layout/focus actions. Use herd spawn for worker assignments, never herdr run. Preserve current UI focus."]
+    : PROMPT_GUIDELINES;
 
   let monitor!: ReturnType<typeof createHerdMonitor>;
   let queue: JobQueue;
@@ -245,7 +246,7 @@ export default function (pi: ExtensionAPI) {
   function refreshSurfaces(ctx?: Pick<ExtensionContext, "ui" | "hasUI">) {
     if (disposed) return;
     if (ctx) ui.bind(ctx);
-    if (!isHerdrEnv()) {
+    if (!herdrClient) {
       ui.clear();
       return;
     }
@@ -395,7 +396,7 @@ export default function (pi: ExtensionAPI) {
     // Only arm tools that this factory actually registered.
     ensureHerdToolsActive(
       pi,
-      isHerdrEnv() ? ["herd", "herdr"] : ["herd"],
+      herdrClient ? ["herd", "herdr"] : ["herd"],
     );
     refreshSurfaces(ctx);
   });
@@ -432,12 +433,12 @@ export default function (pi: ExtensionAPI) {
     refreshConfig();
     noteModelIdentity(ctx);
     const options = event.systemPromptOptions;
-    const owned = new Set([...PROMPT_GUIDELINES, ...PRIVATE_MODEL_GUIDELINES, startupCatalog, catalog]);
+    const owned = new Set([...PROMPT_GUIDELINES, ...promptGuidelines, ...PRIVATE_MODEL_GUIDELINES, startupCatalog, catalog]);
     const keepOther = (rules: string[]) => rules.filter((rule) => !owned.has(rule));
     options.promptGuidelines = keepOther(options.promptGuidelines);
     options.toolGuidelines.herd = keepOther(options.toolGuidelines.herd ?? []);
     catalog = sanitizeForCloud(formatWorkers(config, ctx.modelRegistry));
-    options.toolGuidelines.herd.push(...PROMPT_GUIDELINES, catalog);
+    options.toolGuidelines.herd.push(...promptGuidelines, catalog);
     if (isCloudIdentity(cloudIdentity(ctx))) {
       options.promptGuidelines.push(...PRIVATE_MODEL_GUIDELINES);
     }
@@ -504,7 +505,7 @@ export default function (pi: ExtensionAPI) {
     return event.payload;
   });
 
-  registerHerdrTool(pi);
+  if (herdrClient) registerHerdrTool(pi, herdrClient.kind === "core" ? herdrClient : undefined);
   registerHerdMessageRenderers(pi);
 
   pi.registerTool({
@@ -514,7 +515,7 @@ export default function (pi: ExtensionAPI) {
       "Agent-chosen configured workers. Nonblocking queue, write lanes, accepted dependencies, private-local operations, and run-scoped peer messages.",
     promptSnippet:
       "Choose worker=; declare owns= for edits and after= for dependencies. Inspect completed results, then accept. private=true routes sensitive tasks locally.",
-    promptGuidelines: [...PROMPT_GUIDELINES, catalog],
+    promptGuidelines: [...promptGuidelines, catalog],
     renderCall: herdRenderCall,
     renderResult: herdRenderResult,
     parameters: HerdParams,

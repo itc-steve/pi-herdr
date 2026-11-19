@@ -3,6 +3,8 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail } from "@earendil-wo
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { resolvePaneRefByLabel, resolveTabRef, resolveWorkspaceRef } from "./resolve.ts";
+import type { CoreClient } from "./core.ts";
+import { registerCoreHerdrTool } from "./core-tool.ts";
 import {
 	createHerdrClient,
 	statusMatches,
@@ -121,7 +123,11 @@ const NotifySoundEnum = Type.Enum(["none", "done", "request"] as const, {
 });
 
 /** Register the structured `herdr` tool. No-op outside a Herdr-managed pane. */
-export function registerHerdrTool(pi: ExtensionAPI): void {
+export function registerHerdrTool(pi: ExtensionAPI, coreClient?: CoreClient): void {
+	if (coreClient) {
+		registerCoreHerdrTool(pi, coreClient);
+		return;
+	}
 	const herdrEnv = process.env.HERDR_ENV;
 	const currentPaneTargetEnv = process.env.HERDR_PANE_ID;
 	if (!herdrEnv || !currentPaneTargetEnv) {

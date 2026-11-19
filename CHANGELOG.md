@@ -2,7 +2,26 @@
 
 All notable changes to `@itc-steve/pi-herdr` are documented here.
 
-## [Unreleased]
+## [2.0.3] — 2026-11-18
+
+**Compatibility:** Requires Pi 1.5.0+ and Node.js 22.19+. No configuration migration from 2.0.2. Finish or abort active herd jobs, update, then `/reload` before spawning new workers. The core adapter targets herdr-core 0.1.17 used by Ovis Electron Desktop.
+
+### Added
+
+- Detect Herdr TUI or local herdr-core/Ovis terminals from their actual inherited identity and endpoint. Core uses direct socket/named-pipe IPC without requiring `hc` on PATH, guessing a session, or starting a daemon.
+- Launch core workers with structured process arguments and explicit environment/session metadata, avoiding POSIX shell startup and npm `.cmd` execution. Workers use the parent's existing placement labels rather than fabricated tabs or workspaces.
+- Provide supported core terminal discovery, inspection, screen/history reads, submitted commands, named keys, bounded waits, and cleanup. Reject unsupported layout/focus actions, literal-text injection, regex watches, and TUI-only read options.
+
+### Fixed
+
+- Retain capacity and write lanes until native worker cleanup is confirmed; missing OSC agent metadata no longer counts as proof that a live process stopped.
+- Reconcile uncertain creation and lost removal replies using exact job labels and observed terminal identities. Verified pre-creation rejections release reservations normally instead of leaving them permanently held.
+- Bound creation, readiness, task acknowledgment, idle waits, and stop operations during in-flight core IPC. Preserve independent cleanup budgets, working-state stall extensions, and the TUI's existing behavior; core submission never adds a duplicate Enter.
+
+### Verification and limits
+
+- 382 tests, typecheck, packaging checks, and an independent targeted review passed. Isolated Linux core 0.1.17 IPC and actual offline Pi 1.5.0 worker boot smoke tests passed.
+- Native Windows IPC/ConPTY, compiled Bun Pi, physical Ovis placement/focus/chat, and live authenticated model turns remain unverified. Core support does not add remote-machine or layout control.
 
 ## [2.0.2] — 2026-11-18
 

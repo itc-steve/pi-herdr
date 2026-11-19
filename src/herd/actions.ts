@@ -16,6 +16,7 @@ import type { LocalStreamLock } from "../local-lock.ts";
 import type { HerdState } from "../state.ts";
 import type { ModelProbeFn } from "../local/preflight.ts";
 import type { HerdrClient } from "../herdr/client.ts";
+import { TERMINAL_RUNTIME_REQUIRED } from "../herdr/runtime.ts";
 import type { HerdMonitor } from "./monitor.ts";
 import {
   collectReply,
@@ -66,6 +67,9 @@ export type HerdRuntime = {
   /** Redaction for cloud parents; set by index.ts. Identity when absent. */
   sanitizeForCloud?: (text: string) => string;
 };
+
+// Remember every observed identity across failed closes, including lost removal replies.
+const recoveredCorePanes = new WeakMap<HerdState["jobs"][string], Set<string>>();
 
 export async function executeHerd(
   runtime: HerdRuntime,
@@ -171,9 +175,7 @@ export async function executeHerd(
   if (action === "spawn") {
     const herdr = runtime.herdr();
     if (!herdr) {
-      throw new Error(
-        "herd spawn requires running inside Herdr (HERDR_ENV=1). Start pi from a herdr pane.",
-      );
+      throw new Error(TERMINAL_RUNTIME_REQUIRED);
     }
     return enqueueSpawn(runtime, params, signal);
   }
@@ -219,7 +221,7 @@ export async function executeHerd(
 
   if (action === "steer") {
     const herdr = runtime.herdr();
-    if (!herdr) throw new Error("herd steer requires Herdr");
+    if (!herdr) throw new Error(TERMINAL_RUNTIME_REQUIRED);
     const jobId = params.jobId?.trim();
     const task = params.task?.trim();
     if (!jobId || !task) throw new Error("steer requires jobId= and task=");
@@ -244,7 +246,7 @@ export async function executeHerd(
 
   if (action === "wait") {
     const herdr = runtime.herdr();
-    if (!herdr) throw new Error("herd wait requires Herdr");
+    if (!herdr) throw new Error(TERMINAL_RUNTIME_REQUIRED);
     const jobId = params.jobId?.trim();
     if (!jobId) throw new Error("wait requires jobId=");
     const job = runtime.state.jobs[jobId];
@@ -266,7 +268,7 @@ export async function executeHerd(
 
   if (action === "collect") {
     const herdr = runtime.herdr();
-    if (!herdr) throw new Error("herd collect requires Herdr");
+    if (!herdr) throw new Error(TERMINAL_RUNTIME_REQUIRED);
     const jobId = params.jobId?.trim();
     if (!jobId) throw new Error("collect requires jobId=");
     const job = runtime.state.jobs[jobId];
@@ -301,23 +303,43 @@ export async function executeHerd(
 
   if (action === "close") {
     const herdr = runtime.herdr();
-    if (!herdr) throw new Error("herd close requires Herdr");
+    if (!herdr) throw new Error(TERMINAL_RUNTIME_REQUIRED);
     const jobId = params.jobId?.trim();
     if (!jobId) throw new Error("close requires jobId=");
-    const job = runtime.state.jobs[jobId];
+    let job = runtime.state.jobs[jobId];
     if (!job) throw new Error(`Unknown job '${jobId}'`);
     const queued = runtime.queue.get(jobId);
     if (queued?.status === "queued" || queued?.status === "running") {
       runtime.queue.abort(jobId);
-      await waitForQueuedJob(queued.finished, params.timeoutMs, signal);
+      if (!await waitForQueuedJob(queued.finished, params.timeoutMs, signal)) {
+        throw new Error(`Job ${jobId} is still stopping; capacity and lanes remain held. Retry herd close after it settles.`);
+      }
+      // Boot can replace the managed record while cancellation is settling.
+      job = runtime.state.jobs[jobId];
+      if (!job) throw new Error(`Unknown job '${jobId}'`);
     }
-    if (!job.paneId) return { text: `Cancelled ${jobId} before boot`, details: { action, jobId } };
-    try {
-      await stopAgentInPane({ herdr, paneId: job.paneId, signal });
-    } catch {
-      // still try close
+    if (herdr.kind === "core" && job.coreJobLabel) {
+      const known = recoveredCorePanes.get(job) ?? new Set<string>();
+      recoveredCorePanes.set(job, known);
+      if (job.paneId) known.add(job.paneId);
+      const matches = await herdr.findWorkerTerminals(job.coreJobLabel, signal);
+      for (const terminal of matches) known.add(terminal.address);
+      if (!known.size) throw new Error("Core worker cleanup unconfirmed: creation may still be pending. Capacity and lanes remain held; retry herd close to reconcile.");
+      for (const paneId of known) {
+        job.paneId = paneId;
+        // Only a previously observed identity can be confirmed absent after a lost rm reply.
+        if (await herdr.getPaneInfo(paneId, signal)) await herdr.closePane(paneId, signal);
+      }
+      recoveredCorePanes.delete(job);
+    } else {
+      if (!job.paneId) return { text: `Cancelled ${jobId} before boot`, details: { action, jobId } };
+      try {
+        await stopAgentInPane({ herdr, paneId: job.paneId, signal });
+      } catch {
+        // still try close
+      }
+      await herdr.closePane(job.paneId, signal);
     }
-    await herdr.closePane(job.paneId, signal);
     runtime.state.activeMonitors.delete(jobId);
     runtime.localLock.release(jobId);
     for (const entry of runtime.monitor.listJobs()) if (entry.handle.jobId === jobId) runtime.monitor.releaseTicket(entry.id);

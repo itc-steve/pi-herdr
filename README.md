@@ -17,9 +17,9 @@ What it does for you:
 
 ## 1. Install
 
-You need **Pi 1.5.0+, Herdr, Node.js 22.19+, and working model connections in Pi**. This extension uses those connections; it does not provide subscriptions or configure model servers.
+You need **Pi 1.5.0+, Node.js 22.19+, a Herdr TUI or herdr-core terminal, and working model connections in Pi**. Ovis Electron Desktop uses herdr-core. This extension uses your existing model connections; it does not provide subscriptions or configure model servers.
 
-Run Pi inside [Herdr](https://herdr.dev), then install:
+Run Pi inside [Herdr](https://herdr.dev) or an Ovis Desktop terminal, then install:
 
 ```bash
 pi install npm:@itc-steve/pi-herdr
@@ -83,13 +83,26 @@ Or:
 
 > Process these customer records locally. Return counts by error category—no names, identifiers, or raw records.
 
-The agent creates a run, queues tasks, reads their reports, and checks the results. Workers appear in background Herdr tabs. The main agent keeps control; workers cannot spawn more workers.
+The agent creates a run, queues tasks, reads their reports, and checks the results. Workers appear in background tabs on the Herdr TUI, or as sibling terminals in the parent's existing Ovis/core group. The main agent keeps control; workers cannot spawn more workers.
 
 ### Ovis chat
 
-Workers advertise their per-run session store with `PI_CODING_AGENT_SESSION_DIR`, matching the explicit `--session` file. This lets Ovis authorize herd sessions without moving them or switching Pi into RPC mode. Ovis still needs Herdr's Pi session-reporting integration and access to the foreground Pi process environment; the custom-store contract is verified on Linux. Existing Ovis authentication and path checks remain intact. Private workers' transcripts are also available to the already-authorized Ovis UI—they are not hidden from the local user.
+Workers advertise their per-run session store with `PI_CODING_AGENT_SESSION_DIR`, matching the explicit `--session` file. This lets Ovis authorize herd sessions without moving them or switching Pi into RPC mode. Ovis still needs access to the foreground Pi process metadata; TUI deployments also use Herdr's Pi session-reporting integration. Existing Ovis authentication and path checks remain intact. Private workers' transcripts are also available to the already-authorized Ovis UI—they are not hidden from the local user.
 
 After updating this extension, finish or abort active jobs, then `/reload` before spawning new workers. Existing worker processes retain their old launch environment.
+
+### TUI and core compatibility
+
+The backend is selected automatically from the terminal's real environment:
+
+- **Herdr TUI:** `HERDR_ENV=1` plus `HERDR_PANE_ID`; uses the existing `herdr` CLI. Complete TUI markers take precedence if both runtimes are inherited.
+- **herdr-core:** `HC_TERMINAL_ID` plus `HC_TERMINAL_SOCKET` (or explicit `HC_SOCKET`). Uses Node's built-in IPC directly; no `hc` executable on PATH is required. The inherited terminal socket takes precedence over a client socket override. `HC_SESSION` alone is not enough to locate the correct core safely.
+
+Do not set fake `HERDR_*` flags to make Ovis look like the TUI. Core launches workers using structured process arguments and explicit environment overrides, not POSIX `env -u` in PowerShell. It copies only existing parent placement labels; it does not fabricate workspaces/tabs or change focus. This adapter targets the core 0.1.17 API bundled with Ovis Electron Desktop.
+
+Core exposes terminal inspection, submitted commands, named keys, waits, and closing a terminal. Layout/focus/worktree operations remain TUI-only. Core reads return screen text plus requested history, not selectable TUI read sources. Literal `send text=` without Enter and regex watches are unsupported; use `run command=` to submit text, or `send keys=` for named keys. Remote-machine terminal control is outside this adapter's scope.
+
+A lost or ambiguous core creation response does not prove no worker started. Recovery uses an exact job label; unresolved creation or cleanup keeps capacity/write lanes held rather than starting another worker unsafely. Source-verified pre-creation rejections fail normally without leaving a reservation stuck. Native Windows/Ovis UI behavior still needs validation on a Windows machine; source/schema checks and synthetic tests are not a substitute.
 
 ## How coordination works
 

@@ -3,7 +3,10 @@
  */
 
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { CoreClientError } from "../herdr/core.ts";
 import type { HerdConfig, ManagedJob } from "../types.ts";
 import type { Mailbox } from "./mailbox.ts";
 import {
@@ -32,6 +35,7 @@ import type { HerdState } from "../state.ts";
 import type { HerdrClient } from "../herdr/client.ts";
 import {
   collectReply,
+  cleanupCoreWorkers,
   createAndBootJob,
   DEFAULT_BOOT_TIMEOUT_MS,
   DEFAULT_DISPATCH_TIMEOUT_MS,
@@ -51,6 +55,24 @@ import { hasPrivateMarker } from "../private.ts";
 import { JobCleanupError } from "./queue.ts";
 
 export class SpawnError extends Error {}
+
+/** Use the installed package bin, never a test/SDK host's argv[1] or daemon PATH. */
+export function piWorkerArgv(args: string[], packageDir: string, runtime: { execPath: string; argv: string[]; versions: Record<string, string | undefined> } = process): string[] {
+  if (runtime.versions.bun) {
+    const entry = runtime.argv[1] ?? "";
+    const compiled = entry.startsWith("/$bunfs/") || /^[A-Za-z]:[\\\\/]~BUN[\\\\/]/.test(entry);
+    if (compiled && /^pi(\.exe)?$/i.test(basename(runtime.execPath))) return [runtime.execPath, ...args];
+    throw new SpawnError("Core worker launch requires Node-installed Pi or a recognized compiled Pi executable; Bun script hosts are unsupported.");
+  }
+  if (!runtime.versions.node || runtime.versions.electron) throw new SpawnError("Core worker launch requires a Node runtime, not an unrecognized or Electron host executable.");
+  const pkg = JSON.parse(readFileSync(resolve(packageDir, "package.json"), "utf8")) as { bin?: { pi?: unknown } };
+  const bin = pkg.bin?.pi;
+  if (typeof bin !== "string" || !/\.[cm]?js$/.test(bin)) throw new SpawnError("Installed Pi package has no runnable JavaScript bin.pi; cannot launch a core worker safely.");
+  const cli = resolve(packageDir, bin);
+  const local = relative(packageDir, cli);
+  if (isAbsolute(local) || local === ".." || local.startsWith(`..${sep}`) || !existsSync(cli)) throw new SpawnError("Installed Pi CLI bin is missing or outside its package; cannot launch a core worker safely.");
+  return [runtime.execPath, cli, ...args];
+}
 
 export type SpawnParams = {
   task: string;
@@ -163,6 +185,7 @@ export async function spawnJob(opts: {
   let jobId = "";
   let ticketId = "";
   let startedPane = "";
+  let coreJobLabel: string | undefined;
 
   try {
     // Job id first so the local-seat claim has a stable holder key before any async work.
@@ -278,6 +301,28 @@ export async function spawnJob(opts: {
     ];
     // Clear optional inherited identities/policy before assigning this job's values.
     const bootCmd = `env -u PI_HERD_PRIVATE -u PI_HERD_MAILBOX -u PI_HERD_JOB -u PI_HERD_OUTPUT ${workerEnv.join(" ")} ${baseBootCmd}`;
+    let coreLaunch: { argv: string[]; env: Record<string, string>; jobLabel: string } | undefined;
+    if (herdr.kind === "core") {
+      const { getPackageDir } = await import("@earendil-works/pi-coding-agent");
+      const args = ["--model", `${resolved.model}:${resolved.thinking}`, "--session", sessionFile,
+        "--extension", fileURLToPath(new URL("../../index.ts", import.meta.url)), ...(isPrivate ? ["--no-mcp"] : [])];
+      const argv = piWorkerArgv(args, getPackageDir());
+      coreJobLabel = `pi-herdr:${randomUUID()}`;
+      coreLaunch = { argv, jobLabel: coreJobLabel, env: {
+        PI_HERD_WORKER: "1", PI_PROGRAM_STATUS: "1",
+        PI_CODING_AGENT_SESSION_DIR: dirname(sessionFile), PI_HERD_ROOT: resolve(cwd),
+        PI_HERD_OWNS: JSON.stringify(owns), PI_HERD_FORBID: JSON.stringify(forbid),
+        PI_HERD_OUTPUT: outputPath ?? "", PI_HERD_PRIVATE: isPrivate ? "1" : "",
+        PI_HERD_MAILBOX: mailbox?.dir ?? "", PI_HERD_JOB: mailbox ? jobId : "",
+        // Core merges daemon env; empty values disable this package's stale TUI identity.
+        HERDR_ENV: "", HERDR_PANE_ID: "", HERDR_WORKSPACE_ID: "", HERDR_TAB_ID: "",
+      } };
+      state.jobs[jobId] = { ...state.jobs[jobId], jobId, label, paneId: "", coreJobLabel, sessionFile,
+        model: resolved.model, thinking: resolved.thinking, local: resolved.local, role: resolved.role,
+        runId, outputPath, owns, forbid, private: isPrivate || undefined, launchedAt: Date.now() };
+      delete state.jobs[jobId]!.workspaceId;
+      if (!state.order.includes(jobId)) state.order.push(jobId);
+    }
     const bootTimeout = Math.min(
       params.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS,
       DEFAULT_BOOT_TIMEOUT_MS,
@@ -288,6 +333,7 @@ export async function spawnJob(opts: {
       label,
       cwd,
       bootCmd,
+      coreLaunch,
       sessionFile,
       timeoutMs: bootTimeout,
       signal: opts.parentSignal,
@@ -335,6 +381,7 @@ export async function spawnJob(opts: {
       label,
       paneId,
       workspaceId,
+      coreJobLabel,
       sessionFile,
       model: resolved.model,
       thinking: resolved.thinking,
@@ -393,7 +440,7 @@ export async function spawnJob(opts: {
           text:
             `Spawned ${jobId} ${resolved.model}:${resolved.thinking}` +
             `${resolved.local ? " [local]" : ""}\n` +
-            `pane ${paneId} workspace ${workspaceId}` +
+            `pane ${paneId}${workspaceId ? ` workspace ${workspaceId}` : ""}` +
             `${nudgedEnter ? " (Enter nudged)" : ""}\n\n` +
             collected.reply,
           details: { handle, collected, nudgedEnter },
@@ -429,7 +476,7 @@ export async function spawnJob(opts: {
       text:
         `Spawned ${jobId} [${resolved.role}] ${resolved.model}:${resolved.thinking}` +
         `${resolved.local ? " [local]" : ""} (async)\n` +
-        `pane ${paneId} · workspace ${workspaceId} · label ${label}\n` +
+        `pane ${paneId}${workspaceId ? ` · workspace ${workspaceId}` : ""} · label ${label}\n` +
         `reason: ${resolved.reason}` +
         `${nudgedEnter ? " · Enter nudged" : ""}\n` +
         `Monitor will deliver a herd-result pointer when the wave finishes.\n` +
@@ -443,7 +490,16 @@ export async function spawnJob(opts: {
       handle,
     };
   } catch (err) {
-    if (startedPane) {
+    if (herdr.kind === "core" && err instanceof CoreClientError && err.uncertain && coreJobLabel) {
+      await cleanupCoreWorkers({ herdr, jobLabel: coreJobLabel, signal: AbortSignal.timeout(15_000), onRecovered: id => {
+        startedPane = id;
+        const job = state.jobs[jobId];
+        if (job) job.paneId = id;
+      } });
+    } else if (herdr.kind === "core" && startedPane) {
+      try { await herdr.closePane(startedPane, AbortSignal.timeout(15_000)); }
+      catch { throw new JobCleanupError(`Could not close core terminal ${startedPane}. Capacity and lanes remain held; herd close jobId=${jobId}.`); }
+    } else if (startedPane) {
       try {
         await stopAgentInPane({ herdr, paneId: startedPane, signal: AbortSignal.timeout(35_000) });
       } catch {
@@ -453,6 +509,8 @@ export async function spawnJob(opts: {
         }
       }
     }
+    // Uncertain creation exits above; a certain pre-create failure needs no recovery label.
+    if (herdr.kind === "core" && !startedPane && state.jobs[jobId]) delete state.jobs[jobId]!.coreJobLabel;
     if (ticketId) monitor.releaseTicket(ticketId);
     if (jobId) monitor.releaseThinkHold(jobId);
     if (localHeld && jobId) localLock.release(jobId);

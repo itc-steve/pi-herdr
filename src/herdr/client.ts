@@ -1,3 +1,4 @@
+import type { CoreClient } from "./core.ts";
 import type {
   AgentInfo,
   AgentStatus,
@@ -99,7 +100,7 @@ export function agentDisplayName(agent: AgentInfo): string {
   return agent.name || agent.display_agent || agent.agent || agent.pane_id;
 }
 
-export function paneHasAgent(pane: PaneInfo | null | undefined): boolean {
+export function paneHasAgent(pane: { agent?: string } | null | undefined): boolean {
   return !!pane?.agent;
 }
 
@@ -410,6 +411,7 @@ export function createHerdrClient(exec: HerdrExecFn) {
   }
 
   return {
+    kind: "herdr" as const,
     execHerdr,
     execHerdrJson,
     execHerdrText,
@@ -434,4 +436,5 @@ export function createHerdrClient(exec: HerdrExecFn) {
   };
 }
 
-export type HerdrClient = ReturnType<typeof createHerdrClient>;
+export type TuiClient = ReturnType<typeof createHerdrClient>;
+export type HerdrClient = TuiClient | CoreClient;

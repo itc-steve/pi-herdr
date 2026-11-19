@@ -8,7 +8,7 @@ import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-cod
 
 it("exposes workers at startup and replaces only owned prompt contributions on every normal/custom run", async (t) => {
   const home = mkdtempSync(join(tmpdir(), "herd-guidance-"));
-  const keys = ["HOME", "HERDR_ENV", "PI_HERD_WORKER", "PI_HERD_PRIVATE"];
+  const keys = [...new Set(["HOME", "HERDR_ENV", "HERDR_PANE_ID", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SOCKET", "HC_SESSION", ...Object.keys(process.env).filter((key) => /^(HERDR_|HC_)/.test(key)), "PI_HERD_WORKER", "PI_HERD_PRIVATE"])];
   const previous = keys.map((key) => process.env[key]);
   t.after(() => {
     keys.forEach((key, i) => {

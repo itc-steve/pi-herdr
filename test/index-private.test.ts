@@ -7,10 +7,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 describe("private-mode extension wiring", () => {
   it("redacts provider context and private-key tool output for cloud models", async (t) => {
-    const oldHome = process.env.HOME;
+    const keys = [...new Set(["HOME", "HERDR_ENV", "HERDR_PANE_ID", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SOCKET", "HC_SESSION", ...Object.keys(process.env).filter((key) => /^(HERDR_|HC_)/.test(key))])];
+    const previous = keys.map((key) => process.env[key]);
+    for (const key of keys) delete process.env[key];
     t.after(() => {
-      if (oldHome === undefined) delete process.env.HOME;
-      else process.env.HOME = oldHome;
+      keys.forEach((key, i) => previous[i] === undefined ? delete process.env[key] : process.env[key] = previous[i]);
     });
     const home = mkdtempSync(join(tmpdir(), "herd-index-private-"));
     const agentDir = join(home, ".pi", "agent");

@@ -11,6 +11,7 @@ import {
   normalizeStatus,
   paneHasAgent,
   type HerdrClient,
+  type TuiClient,
 } from "../herdr/client.ts";
 import {
   collectFromSessionFile,
@@ -21,6 +22,32 @@ import {
   type MessageEntry,
 } from "../readback.ts";
 import { ensureOutputFile } from "../handoff.ts";
+import type { CoreClient, CorePane, CoreWorkerOptions } from "../herdr/core.ts";
+import { JobCleanupError } from "./queue.ts";
+
+type WorkerPane = PaneInfo | CorePane;
+
+function assertWorkerLive(pane: WorkerPane): void {
+  if ("state" in pane && pane.state === "finished") throw new Error(`Worker terminal ${pane.pane_id} finished before completion.`);
+  if ("reported_status" in pane && pane.reported_status === "error") throw new Error(`Worker terminal ${pane.pane_id} reported native error.`);
+}
+
+/** Reconcile an uncertain run once; absence cannot prove a pending create failed. */
+export async function cleanupCoreWorkers(opts: {
+  herdr: CoreClient;
+  jobLabel: string;
+  onRecovered: (paneId: string) => void;
+  signal?: AbortSignal;
+}): Promise<void> {
+  try {
+    const terminals = await opts.herdr.findWorkerTerminals(opts.jobLabel, opts.signal);
+    if (!terminals.length) throw new Error("No matching terminal; creation may still be pending");
+    for (const terminal of terminals) opts.onRecovered(terminal.address);
+    for (const terminal of terminals) await opts.herdr.closePane(terminal.address, opts.signal);
+  } catch (error) {
+    throw new JobCleanupError(`Core worker cleanup unconfirmed for ${opts.jobLabel}: ${error instanceof Error ? error.message : String(error)}. Capacity and lanes remain held; reconcile with herd close.`);
+  }
+}
 
 export const DEFAULT_BOOT_TIMEOUT_MS = 90_000;
 export const DEFAULT_DISPATCH_TIMEOUT_MS = 600_000;
@@ -41,7 +68,7 @@ export type JobHandle = {
   jobId: string;
   label: string;
   paneId: string;
-  workspaceId: string;
+  workspaceId?: string;
   sessionFile: string;
   watermark: number;
   taskPreview: string;
@@ -83,6 +110,11 @@ function isAbortError(err: unknown): boolean {
 function looksLikeTimeoutError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /timeout|timed out|deadline/i.test(msg);
+}
+
+function deadlineSignal(timeoutMs: number, signal?: AbortSignal): AbortSignal {
+  const deadline = AbortSignal.timeout(Math.max(1, Math.ceil(timeoutMs)));
+  return signal ? AbortSignal.any([signal, deadline]) : deadline;
 }
 
 export async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -137,7 +169,7 @@ export function scrollbackLooksLikeShellPrompt(text: string): boolean {
 }
 
 export async function waitForShellReady(
-  herdr: HerdrClient,
+  herdr: TuiClient,
   paneId: string,
   timeoutMs: number,
   signal?: AbortSignal,
@@ -193,13 +225,14 @@ async function waitUntilAgentDetected(
   timeoutMs: number,
   signal?: AbortSignal,
   onStatus?: PaneStatusHandler,
-): Promise<PaneInfo> {
+): Promise<WorkerPane> {
   const deadline = Date.now() + Math.max(1, timeoutMs);
-  let last: PaneInfo | null = null;
+  let last: WorkerPane | null = null;
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error("Aborted");
     last = await herdr.getPaneInfo(paneId, signal);
     if (!last) throw new Error(`Pane ${paneId} disappeared during boot`);
+    assertWorkerLive(last);
     onStatus?.(normalizeStatus(last.agent_status));
     if (paneHasAgent(last)) return last;
     await sleep(POLL_MS, signal);
@@ -216,20 +249,22 @@ export async function waitUntilAgentReady(
   timeoutMs: number,
   signal?: AbortSignal,
   onStatus?: PaneStatusHandler,
-): Promise<PaneInfo> {
+): Promise<WorkerPane> {
   const deadline = Date.now() + Math.max(1, timeoutMs);
+  if (herdr.kind === "core") signal = deadlineSignal(timeoutMs, signal);
   const remaining = () => Math.max(1, deadline - Date.now());
 
   const observe = statusObserver(onStatus);
   await waitUntilAgentDetected(herdr, paneId, remaining(), signal, observe);
 
-  let useNativeWait = typeof herdr.waitAgentStatus === "function";
-  let last: PaneInfo | null = null;
+  let useNativeWait = "waitAgentStatus" in herdr;
+  let last: WorkerPane | null = null;
 
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error("Aborted");
     last = await herdr.getPaneInfo(paneId, signal);
     if (!last) throw new Error(`Pane ${paneId} disappeared during boot`);
+    assertWorkerLive(last);
     const status = normalizeStatus(last.agent_status);
     observe(status);
     if (!paneHasAgent(last)) {
@@ -239,15 +274,20 @@ export async function waitUntilAgentReady(
     if (isAgentAcceptingInput(status)) {
       await sleep(AGENT_READY_SETTLE_MS, signal);
       const settled = await herdr.getPaneInfo(paneId, signal);
+      if (settled) assertWorkerLive(settled);
       if (!settled || !paneHasAgent(settled)) continue;
       observe(normalizeStatus(settled.agent_status));
       if (isAgentAcceptingInput(normalizeStatus(settled.agent_status))) {
+        if (herdr.kind === "core") {
+          signal?.throwIfAborted();
+          if (Date.now() >= deadline) break;
+        }
         return settled;
       }
       continue;
     }
 
-    if (useNativeWait) {
+    if (useNativeWait && "waitAgentStatus" in herdr) {
       try {
         await herdr.waitAgentStatus(paneId, "idle", Math.min(POLL_MS, remaining()), signal);
         continue;
@@ -268,7 +308,7 @@ export async function waitUntilAgentReady(
 }
 
 export async function bootIntoPane(opts: {
-  herdr: HerdrClient;
+  herdr: TuiClient;
   paneId: string;
   bootCmd: string;
   sessionFile: string;
@@ -276,7 +316,7 @@ export async function bootIntoPane(opts: {
   timeoutMs: number;
   signal?: AbortSignal;
   onStatus?: PaneStatusHandler;
-}): Promise<PaneInfo> {
+}): Promise<WorkerPane> {
   mkdirSync(dirname(opts.sessionFile), { recursive: true });
   try {
     await opts.herdr.renamePane(opts.paneId, opts.label, opts.signal);
@@ -297,13 +337,26 @@ export async function createAndBootJob(opts: {
   label: string;
   cwd: string;
   bootCmd: string;
+  coreLaunch?: Omit<CoreWorkerOptions, "cwd" | "label">;
   sessionFile: string;
   timeoutMs?: number;
   signal?: AbortSignal;
-  onPaneCreated?: (paneId: string, workspaceId: string) => void;
+  onPaneCreated?: (paneId: string, workspaceId?: string) => void;
   onStatus?: PaneStatusHandler;
-}): Promise<{ paneId: string; workspaceId: string }> {
+}): Promise<{ paneId: string; workspaceId?: string }> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
+  if (opts.herdr.kind === "core") {
+    const deadline = Date.now() + Math.max(1, timeoutMs);
+    const signal = deadlineSignal(timeoutMs, opts.signal);
+    if (!opts.coreLaunch) throw new Error("Core boot requires structured worker argv/env/jobLabel");
+    mkdirSync(dirname(opts.sessionFile), { recursive: true });
+    const terminal = await opts.herdr.createWorkerTerminal({ ...opts.coreLaunch, cwd: opts.cwd, label: opts.label }, signal);
+    opts.onPaneCreated?.(terminal.address);
+    signal.throwIfAborted();
+    await waitUntilAgentReady(opts.herdr, terminal.address, Math.max(1, deadline - Date.now()), signal, opts.onStatus);
+    signal.throwIfAborted();
+    return { paneId: terminal.address };
+  }
   const currentPane = await opts.herdr.getCurrentPaneInfo(opts.signal);
   const workspaceId = currentPane.workspace_id;
   // Always a new tab: two-word labels collide, so reuse-by-name would steal a live worker.
@@ -335,6 +388,15 @@ export async function stopAgentInPane(opts: {
   signal?: AbortSignal;
 }): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? AGENT_QUIT_TIMEOUT_MS;
+  if (opts.herdr.kind === "core") {
+    const signal = deadlineSignal(timeoutMs, opts.signal);
+    const pane = await opts.herdr.getPaneInfo(opts.paneId, signal);
+    signal.throwIfAborted();
+    // OSC app reports are optional metadata, not native process liveness.
+    if (pane && pane.state === "live") await opts.herdr.closePane(opts.paneId, signal);
+    signal.throwIfAborted();
+    return;
+  }
   const deadline = Date.now() + Math.max(1, timeoutMs);
 
   let pane = await opts.herdr.getPaneInfo(opts.paneId, opts.signal);
@@ -386,6 +448,9 @@ export async function submitTaskToPane(opts: {
   watermark?: number;
   signal?: AbortSignal;
 }): Promise<{ nudgedEnter: boolean }> {
+  if (opts.herdr.kind === "core") {
+    opts = { ...opts, signal: deadlineSignal(AGENT_READY_SETTLE_MS + POST_SUBMIT_CONFIRM_MS, opts.signal) };
+  }
   // Settle briefly so footer/extensions finish writing JSONL before we snapshot.
   await sleep(AGENT_READY_SETTLE_MS, opts.signal);
 
@@ -405,6 +470,7 @@ export async function submitTaskToPane(opts: {
   const kickLanded = async (): Promise<boolean> => {
     const pane = await opts.herdr.getPaneInfo(opts.paneId, opts.signal);
     if (!pane) throw new Error(`Pane ${opts.paneId} disappeared after submit`);
+    assertWorkerLive(pane);
     const status = normalizeStatus(pane.agent_status);
     if (status === "working" || status === "blocked") return true;
     if (opts.sessionFile && hasUserMessageAfter(opts.sessionFile, watermark)) {
@@ -417,6 +483,7 @@ export async function submitTaskToPane(opts: {
     if (opts.signal?.aborted) throw new Error("Aborted");
 
     if (await kickLanded()) {
+      if (opts.herdr.kind === "core") opts.signal?.throwIfAborted();
       return { nudgedEnter: nudgedEnter || nudgedEnterTwice };
     }
 
@@ -426,8 +493,8 @@ export async function submitTaskToPane(opts: {
 
     // Nudge Enter when idle/done, and also on "unknown" — status detection can
     // lag right after boot under parallel spawns, leaving the kick in the editor.
-    const mayNeedEnter =
-      isAgentAcceptingInput(status) || status === "unknown";
+    const mayNeedEnter = opts.herdr.kind !== "core" &&
+      (isAgentAcceptingInput(status) || status === "unknown");
     if (
       !nudgedEnter &&
       elapsed >= POST_SUBMIT_ENTER_RETRY_MS &&
@@ -477,7 +544,8 @@ export async function waitForJobIdle(opts: {
   let sawBusy = false;
   const started = Date.now();
   const observe = statusObserver(opts.onStatus);
-  let useNativeWait = typeof opts.herdr.waitAgentStatus === "function";
+  let useNativeWait = "waitAgentStatus" in opts.herdr;
+  let signal = opts.signal;
 
   function hasPostSubmitEvidence(): boolean {
     if (
@@ -517,15 +585,24 @@ export async function waitForJobIdle(opts: {
   // Stall clock, not job wall-clock: only working slides it, not user prompts.
   // A 10min local review must not free the GPU seat under itself.
   while (true) {
-    if (opts.signal?.aborted) throw new Error("Aborted");
+    if (opts.herdr.kind === "core") signal = deadlineSignal(deadline - Date.now(), opts.signal);
+    if (signal?.aborted) throw new Error("Aborted");
 
-    const pane = await opts.herdr.getPaneInfo(opts.paneId, opts.signal);
+    const pane = await opts.herdr.getPaneInfo(opts.paneId, signal);
+    if (opts.herdr.kind === "core") {
+      signal?.throwIfAborted();
+      if (Date.now() >= deadline) break;
+    }
     if (!pane) throw new Error(`Pane ${opts.paneId} disappeared while waiting`);
+    assertWorkerLive(pane);
 
     const status = normalizeStatus(pane.agent_status);
     observe(status);
     if (status === "working" || status === "blocked") sawBusy = true;
-    if (status === "working") deadline = Date.now() + timeoutMs;
+    if (status === "working") {
+      deadline = Date.now() + timeoutMs;
+      if (opts.herdr.kind === "core") signal = deadlineSignal(timeoutMs, opts.signal);
+    }
 
     if (status === "idle" || status === "done") {
       const elapsed = Date.now() - started;
@@ -539,7 +616,7 @@ export async function waitForJobIdle(opts: {
         if (opts.mailboxFinished && !opts.mailboxFinished()) {
           const remaining = deadline - Date.now();
           if (remaining <= 0) break;
-          await sleep(Math.min(POLL_MS, remaining), opts.signal);
+          await sleep(Math.min(POLL_MS, remaining), signal);
           continue;
         }
         assertSessionSucceeded();
@@ -549,7 +626,7 @@ export async function waitForJobIdle(opts: {
         ) {
           const remaining = deadline - Date.now();
           if (remaining <= 0) break;
-          await sleep(Math.min(OUTPUT_SETTLE_POLL_MS, remaining), opts.signal);
+          await sleep(Math.min(OUTPUT_SETTLE_POLL_MS, remaining), signal);
           continue;
         }
         return { status, sawBusy };
@@ -560,7 +637,7 @@ export async function waitForJobIdle(opts: {
 
     const remaining = deadline - Date.now();
     if (
-      useNativeWait &&
+      useNativeWait && "waitAgentStatus" in opts.herdr &&
       (status === "working" || status === "blocked" || status === "unknown")
     ) {
       try {
@@ -568,11 +645,11 @@ export async function waitForJobIdle(opts: {
           opts.paneId,
           "idle",
           Math.min(POLL_MS, remaining),
-          opts.signal,
+          signal,
         );
         continue;
       } catch (err) {
-        if (opts.signal?.aborted || isAbortError(err)) throw err;
+        if (signal?.aborted || isAbortError(err)) throw err;
         if (looksLikeTimeoutError(err)) {
           // Re-check pane. Still-working slides the deadline next iteration.
           continue;
@@ -581,10 +658,13 @@ export async function waitForJobIdle(opts: {
       }
     }
 
-    await sleep(Math.min(POLL_MS, Math.max(1, deadline - Date.now())), opts.signal);
+    await sleep(Math.min(POLL_MS, Math.max(1, deadline - Date.now())), signal);
   }
 
+  // Core's stall deadline also bounds the final IPC; never accept a late idle.
+  if (opts.herdr.kind === "core") throw new Error(`Timed out waiting for pane ${opts.paneId} to finish.`);
   const pane = await opts.herdr.getPaneInfo(opts.paneId, opts.signal);
+  if (pane) assertWorkerLive(pane);
   const last = pane ? normalizeStatus(pane.agent_status) : "unknown";
   observe(last);
 
@@ -636,7 +716,7 @@ export async function collectReply(opts: {
     }
     const text = await herdr.readPane(
       handle.paneId,
-      { source: "recent-unwrapped", lines: 200 },
+      herdr.kind === "core" ? { lines: 200 } : { source: "recent-unwrapped", lines: 200 },
       signal,
     );
     reply = extractFromScrollback(text);

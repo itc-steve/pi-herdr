@@ -74,7 +74,9 @@ export interface ManagedJob {
   jobId: string;
   label: string;
   paneId: string;
-  workspaceId: string;
+  workspaceId?: string;
+  /** Exact native recovery label, persisted before terminal.run may create a worker. */
+  coreJobLabel?: string;
   sessionFile: string;
   model: string;
   thinking: string;

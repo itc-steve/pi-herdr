@@ -21,3 +21,15 @@ No live Herdr/model integration run. No dependencies changed. Existing uncommitt
 - [x] Isolated offline Pi 1.5 CLI extension-loader/help smoke passes with empty HOME; 4 installed Ovis resolver tests pass.
 - [x] README, packaged skill and Unreleased changelog updated; original dirty work preserved; no commit or release.
 - [ ] Live Ovis chat/physical TUI check: finish jobs and `/reload`, then launch a fresh harmless worker. Existing processes retain the old launch environment.
+
+# Ovis Desktop / herdr-core compatibility
+
+- [x] Confirm scope: both runtimes, native Windows-safe launch, full worker lifecycle, supported core terminal controls, no release.
+- [x] Map existing TUI coupling and public Ovis/core documentation; identify bundled core 0.1.17 and remaining source-contract gaps.
+- [x] Verify 0.1.17 executable schema, endpoint routing, Windows entrypoint, status and visibility contract (source/schema verified; native Windows runtime not tested).
+- [x] Add minimal runtime detection/core adapter with transport and capability tests (7 runtime and 16 client tests).
+- [x] Integrate worker launch, privacy/ownership metadata, status and safe cleanup; preserve TUI behavior.
+- [x] Enable supported core terminal tools; update runtime guidance, README, skills and Unreleased notes.
+- [x] Finish independent stable-code review: fixed three cleanup/rejection/deadline findings; targeted fresh recheck found no remaining actionable issue. Parent and reviewer each passed 382 tests, typecheck and diff-check; package dry-run passed.
+- [x] Isolated real core 0.1.17 IPC and actual offline Pi 1.5.0 structured boot smoke passed on Linux; no model calls or user terminals/config changes.
+- [ ] Native Windows IPC/ConPTY, compiled Bun Pi, and physical Ovis placement/chat validation remain external checks.

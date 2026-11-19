@@ -10,6 +10,7 @@ import { nextJobId, requireActiveOrRef } from "../runs.ts";
 import { hasPrivateMarker } from "../private.ts";
 import { shortTabLabel } from "./boot.ts";
 import { spawnJob } from "./spawn.ts";
+import { TERMINAL_RUNTIME_REQUIRED } from "../herdr/runtime.ts";
 
 export async function enqueueSpawn(runtime: HerdRuntime, params: HerdActionParams, signal?: AbortSignal) {
   if (process.env.PI_HERD_PRIVATE === "1" || process.env.PI_HERD_WORKER === "1") throw new Error("Workers cannot spawn further jobs; return blockers to the parent.");
@@ -24,7 +25,7 @@ export async function enqueueSpawn(runtime: HerdRuntime, params: HerdActionParam
   if (!task) throw new Error("task is required");
   if (config.private.enabled && !params.private && [task, params.reads ?? ""].some(hasPrivateMarker)) throw new Error("Private marker found; retry with private=true.");
   const herdr = runtime.herdr();
-  if (!herdr) throw new Error("herd spawn requires running inside Herdr (HERDR_ENV=1).");
+  if (!herdr) throw new Error(TERMINAL_RUNTIME_REQUIRED);
   const owns = parsePathList(params.owns);
   const forbid = parsePathList(params.forbid);
   assertLaneAvailable({ key: "new", owns, forbid, inFlight: [] });
@@ -45,7 +46,7 @@ export async function enqueueSpawn(runtime: HerdRuntime, params: HerdActionParam
   const mailbox = params.private ? undefined : runtime.state.mailboxes.get(runId);
   mailbox?.register(jobId, label);
   runtime.state.jobs[jobId] = {
-    jobId, label, paneId: "", workspaceId: "", sessionFile,
+    jobId, label, paneId: "", sessionFile,
     model: worker.model, thinking: worker.thinking, local: worker.local === true,
     role: "do", runId, outputPath, private: params.private,
     owns, forbid, launchedAt: 0,

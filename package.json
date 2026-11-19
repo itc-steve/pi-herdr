@@ -1,6 +1,6 @@
 {
   "name": "@itc-steve/pi-herdr",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Pi extension for Herdr-visible agent-chosen workers, queued tasks, write lanes, and private-local operations.",
   "keywords": [
     "pi-package",

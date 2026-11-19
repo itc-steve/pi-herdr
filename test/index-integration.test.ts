@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
+import { randomUUID } from "node:crypto";
+import type { HerdRuntime } from "../src/herd/actions.ts";
+import type { CoreClient } from "../src/herdr/core.ts";
 import { setImmediate as nextTick } from "node:timers/promises";
 import { Type } from "typebox";
 import { createEventBus, createExtensionRuntime } from "@earendil-works/pi-coding-agent";
@@ -10,7 +14,7 @@ import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-cod
 
 it("Pi 1.5 registrations, policy, renderers, registry, progress and cancelled-parent delivery", async (t) => {
   const home = mkdtempSync(join(tmpdir(), "herd-index-integration-"));
-  const keys = ["HOME", "HERDR_ENV", "HERDR_PANE_ID", "PI_HERD_WORKER", "PI_HERD_PRIVATE", "PI_HERD_ROOT", "PI_HERD_OWNS", "PI_HERD_FORBID", "PI_HERD_OUTPUT"];
+  const keys = [...new Set(["HOME", "HERDR_ENV", "HERDR_PANE_ID", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SOCKET", "HC_SESSION", ...Object.keys(process.env).filter((key) => /^(HERDR_|HC_)/.test(key)), "PI_HERD_WORKER", "PI_HERD_PRIVATE", "PI_HERD_ROOT", "PI_HERD_OWNS", "PI_HERD_FORBID", "PI_HERD_OUTPUT"])];
   const previous = keys.map((key) => process.env[key]);
   for (const key of keys) delete process.env[key];
   process.env.HOME = home;
@@ -230,5 +234,158 @@ it("Pi 1.5 registrations, policy, renderers, registry, progress and cancelled-pa
     assert.match(JSON.stringify(await gate("write", join(home, "src.ts"))), /"block":true/);
     assert.deepEqual(await gate("read", join(home, "src.ts")), [undefined]);
     for (const handler of worker.handlers.get("session_shutdown") ?? []) await handler({}, {});
+  });
+});
+
+it("runtime selection registers/activates only real capabilities and keeps nonterminal herd usable", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "herd-runtime-index-"));
+  const keys = [...new Set(["HOME", "HERDR_ENV", "HERDR_PANE_ID", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SOCKET", "HC_SESSION", ...Object.keys(process.env).filter((key) => /^(HERDR_|HC_)/.test(key)), "PI_HERD_WORKER", "PI_HERD_PRIVATE"])];
+  const previous = keys.map((key) => process.env[key]);
+  const clear = () => { for (const key of keys) delete process.env[key]; process.env.HOME = home; };
+  t.after(() => {
+    keys.forEach((key, i) => previous[i] === undefined ? delete process.env[key] : process.env[key] = previous[i]);
+    rmSync(home, { recursive: true, force: true });
+  });
+  clear();
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  writeFileSync(join(home, ".pi", "agent", "herd.json"), JSON.stringify({ private: { enabled: false }, sessionDir: join(home, "runs") }));
+  const socketPath = process.platform === "win32" ? `\\\\.\\pipe\\herd-index-${randomUUID()}` : join(home, "core.sock");
+  const methods: string[] = [];
+  const server = createServer((socket) => {
+    socket.on("error", () => {});
+    let buffer = "";
+    socket.on("data", (data) => {
+      buffer += data.toString();
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.split("\n")[0]!);
+      methods.push(request.method);
+      assert.equal(request.method, "terminal.get");
+      socket.end(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { address: "t1", labels: {}, argv: [], cwd: home, state: "live", created_ms: 1, screen: "", cols: 80, rows: 24 } }) + "\n");
+    });
+  });
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const { default: register } = await import("../index.ts");
+  for (const [name, env] of Object.entries({
+    core: { HC_TERMINAL_ID: "t1", HC_TERMINAL_SOCKET: socketPath },
+    tui: { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" },
+    absent: {}, incompleteTui: { HERDR_ENV: "1" }, incompleteCore: { HC_TERMINAL_ID: "t1", HC_SESSION: "no-default-socket" },
+  })) await t.test(name, async () => {
+    clear(); Object.assign(process.env, env);
+    let active = ["read"];
+    const statuses: unknown[] = [];
+    const ctx = { sessionManager: { getBranch: () => [] }, hasUI: true, ui: { setStatus: (_key: string, value: unknown) => statuses.push(value), setWidget: () => {}, notify: () => {} }, isIdle: () => true };
+    const extension = await loadExtensionFromFactory((pi) => register({ ...pi,
+      getActiveTools: () => active, setActiveTools: (tools) => { active = tools; },
+      exec: async () => { throw new Error("Core must not dispatch TUI exec"); },
+    }), home, createEventBus(), createExtensionRuntime());
+    try {
+      for (const handler of extension.handlers.get("session_start") ?? []) await handler({}, ctx);
+      const terminal = name === "core" || name === "tui";
+      assert.deepEqual(active, terminal ? ["read", "herd", "herdr"] : ["read", "herd"]);
+      assert.equal(extension.tools.has("herdr"), terminal);
+      const herd = extension.tools.get("herd")!.definition;
+      const call = (params: object) => Reflect.apply(herd.execute, undefined, ["runtime", params, undefined, undefined, ctx]);
+      assert.match((await call({ action: "status" })).content[0].text, /herd status/);
+      assert.equal((await call({ action: "reset" })).details.error, undefined);
+      if (terminal) {
+        const herdr = extension.tools.get("herdr")!.definition;
+        const schema = herdr.parameters as { properties: Record<string, { enum?: string[] }> };
+        if (name === "core") {
+          assert.deepEqual(schema.properties.action!.enum, ["list", "current", "pane_get", "agent_list", "agent_get", "read", "run", "send", "stop", "watch", "wait_agent"]);
+          const result = await Reflect.apply(herdr.execute, undefined, ["current", { action: "current" }]);
+          assert.equal(result.details.pane_id, "t1");
+          assert.deepEqual(methods, ["terminal.get"]);
+          assert.doesNotMatch(JSON.stringify(herd.parameters), /Herdr tab/);
+          assert.doesNotMatch(herd.promptGuidelines!.join("\n"), /view\/focus/);
+          assert.match(herd.promptGuidelines!.join("\n"), /no.*focus/i);
+          // Guidance, activation and surfaces follow the selected client, not later ambient flags.
+          delete process.env.HC_TERMINAL_ID; process.env.HERDR_ENV = "1";
+          const options = { promptGuidelines: [], toolGuidelines: { herd: [...herd.promptGuidelines!] } };
+          for (const handler of extension.handlers.get("before_agent_start") ?? []) await handler({ systemPromptOptions: options }, ctx);
+          assert.doesNotMatch(options.toolGuidelines.herd.join("\n"), /view\/focus/);
+          for (const handler of extension.handlers.get("session_start") ?? []) await handler({}, ctx);
+          assert.deepEqual(active, ["read", "herd", "herdr"]);
+        } else assert.ok(schema.properties.action!.enum!.includes("workspace_create"));
+      } else {
+        const result = await call({ action: "spawn", task: "not launched" });
+        assert.match(result.content[0].text, /HERDR_PANE_ID/);
+        assert.match(result.content[0].text, /HC_TERMINAL_ID.*HC_TERMINAL_SOCKET/);
+        assert.match(result.content[0].text, /do not spoof/);
+      }
+      assert.equal(statuses.some((value) => typeof value === "string" && value.includes("herd ●")), false);
+    } finally { for (const handler of extension.handlers.get("session_shutdown") ?? []) await handler({}, ctx); }
+  });
+});
+
+it("core close recovers all exact-label terminals before freeing held capacity", async (t) => {
+  const { executeHerd } = await import("../src/herd/actions.ts");
+  const { createHerdState } = await import("../src/state.ts");
+  const { createLocalStreamLock } = await import("../src/local-lock.ts");
+  const { createJobQueue, JobCleanupError } = await import("../src/herd/queue.ts");
+  const { createHerdMonitor } = await import("../src/herd/monitor.ts");
+  const { loadHerdConfig } = await import("../src/config.ts");
+  for (const scenario of ["unknown", "multiple", "multiple-hidden", "lost-remove", "list-failure", "close-failure", "get-failure", "settling", "timeout"] as const) await t.test(scenario, async () => {
+    const events: string[] = [];
+    const state = createHerdState();
+    const queue = createJobQueue();
+    const localLock = createLocalStreamLock(1);
+    const live = new Set(scenario.startsWith("multiple") ? ["t2", "t3"] : ["close-failure", "get-failure", "settling", "timeout"].includes(scenario) ? ["t2"] : []);
+    let failing = scenario === "close-failure" || scenario === "multiple-hidden";
+    let hideMatches = false;
+    const core = { kind: "core", findWorkerTerminals: async (label: string) => {
+      assert.equal(label, "pi-herdr:unique"); events.push("list");
+      if (scenario === "list-failure") throw new Error("transport failure");
+      return (hideMatches ? [] : [...live]).map((address) => ({ address }));
+    }, getPaneInfo: async (id: string) => {
+      events.push(`get:${id}`);
+      if (scenario === "get-failure") throw new Error("get transport failure");
+      return live.has(id) ? { pane_id: id } : null;
+    },
+    closePane: async (id: string) => {
+      assert.equal(state.jobs.job!.paneId, id, "register identity before closing");
+      events.push(`close:${id}`); live.delete(id);
+      if (failing) { hideMatches = true; throw new Error("lost rm reply"); }
+    } } as unknown as CoreClient;
+    const monitor = createHerdMonitor({ getMaxConcurrent: () => 1, herdr: () => core, onComplete: () => {} });
+    const config = loadHerdConfig(join(tmpdir(), `nonexistent-herd-fixture-${randomUUID()}.json`));
+    const runtime: HerdRuntime = { getConfig: () => config, state, localLock, queue, monitor, herdr: () => core };
+    state.jobs.job = { jobId: "job", label: "fixture", paneId: scenario === "lost-remove" ? "t2" : "", coreJobLabel: "pi-herdr:unique", sessionFile: "unused", model: "test/model", thinking: "off", local: true, role: "do", runId: null, owns: ["src/x.ts"], forbid: [], launchedAt: 0 };
+    await localLock.acquire("job");
+    const initialJob = state.jobs.job;
+    if (scenario === "settling") delete initialJob.coreJobLabel;
+    let settle!: () => void;
+    const job = queue.enqueue({ id: "job", group: "fixture", maxConcurrent: 1, cwd: process.cwd(), owns: ["src/x.ts"], after: [], run: async (signal) => {
+      if (scenario === "settling" || scenario === "timeout") {
+        await new Promise<void>((resolve) => {
+          settle = resolve;
+          if (scenario === "settling") signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        state.jobs.job = { ...initialJob, coreJobLabel: "pi-herdr:unique", paneId: "t2" };
+      }
+      throw new JobCleanupError("synthetic uncertain create");
+    } });
+    if (scenario !== "settling" && scenario !== "timeout") await job.finished;
+    assert.equal(job.held, true);
+    try {
+      const close = () => executeHerd(runtime, { action: "close", jobId: "job", timeoutMs: 10 });
+      if (scenario === "timeout") {
+        await assert.rejects(close(), /still stopping/);
+        assert.equal(job.held, true); assert.equal(localLock.inUse(), 1); assert.deepEqual(events, []);
+        settle(); await job.finished;
+        return;
+      }
+      if (["unknown", "list-failure", "close-failure", "multiple-hidden", "get-failure"].includes(scenario)) {
+        await assert.rejects(close(), /pending|transport|lost rm/);
+        assert.equal(job.held, true); assert.equal(localLock.inUse(), 1);
+        if (scenario !== "close-failure" && scenario !== "multiple-hidden") return;
+        failing = false;
+        assert.equal(state.jobs.job.paneId, "t2");
+        await close(); // terminal.rm succeeded but its reply was lost; known absence is sufficient.
+      } else await close();
+      assert.equal(job.held, false); assert.equal(localLock.inUse(), 0); assert.equal(live.size, 0);
+      if (scenario.startsWith("multiple")) assert.deepEqual(events.filter((value) => value.startsWith("close:")), ["close:t2", "close:t3"]);
+      if (scenario === "lost-remove") assert.ok(events.includes("get:t2"));
+    } finally { queue.dispose(); monitor.dispose(); }
   });
 });
